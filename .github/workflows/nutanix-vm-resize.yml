@@ -7,7 +7,6 @@ on:
       pE_IP: { description: 'Cluster IP', required: true }
       CPU_size: { description: 'CPU Cores', required: true }
       mem_size: { description: 'Memory (GB)', required: true }
-      delay_mins: { description: 'Delay (min)', required: false, default: '0' }
       disk_action: { description: 'Action (add/none)', required: true, default: 'none' }
       size_gb: { description: 'Disk Size (GB)', required: false, default: '0' }
 
