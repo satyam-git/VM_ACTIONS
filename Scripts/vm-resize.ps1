@@ -1,30 +1,38 @@
 param($JsonInputs)
 $data = $JsonInputs | ConvertFrom-Json
-$plinkPath = "C:\Automation\Tools\plink.exe"
 
 # Configuration
 $PE_Username = $env:PE_USER
-$PE_Password = $env:PE_PASS
+$PE_Password = $env:PE_PASS | ConvertTo-SecureString -AsPlainText -Force
 $ClusterIP = $data.pE_IP
 $VMName = $data.vmname
-$CPUS = [int]$data.CPU_size
+$CPUs = [int]$data.CPU_size
 $MemoryMB = [int]$data.mem_size * 1024
-$Delay = [int]$data.delay_mins
 
-# Prepare the ACLI command for compute resources
-$AcliCmd = "acli vm.update '$VMName' num_vcpus=$CPUS memory=$MemoryMB"
-
-# Execute via Plink
-# -batch: No interactive prompts
-# -no-antispoof: Prevents hanging on session start banners
-$plinkArgs = @("-batch", "-no-antispoof", "-ssh", "-pw", $PE_Password, "$PE_Username@$ClusterIP", $AcliCmd)
-
-Write-Host "Connecting to $ClusterIP to resize VM $VMName..."
-$process = Start-Process -FilePath $plinkPath -ArgumentList $plinkArgs -Wait -PassThru -NoNewWindow
-
-if ($process.ExitCode -eq 0) {
-    Write-Host "Compute resources updated successfully."
-} else {
-    Write-Error "Plink failed with exit code $($process.ExitCode). Ensure the host key is cached for the user running the GitHub Actions service."
+# Load Nutanix Module
+if (-not (Get-Module -Name NutanixCmdletsPSSnapin -ListAvailable)) {
+    Write-Error "Nutanix PowerShell Cmdlets not found."
     exit 1
 }
+Add-PSSnapin NutanixCmdletsPSSnapin | Out-Null
+
+# Connect to Cluster
+Connect-NTNXCluster -Server $ClusterIP -UserName $PE_Username -Password $PE_Password -AcceptInvalidSSLCerts | Out-Null
+
+# Find the VM
+$VM = Get-NTNXVM | Where-Object { $_.vmName -eq $VMName }
+if (-not $VM) {
+    Write-Error "VM $VMName not found on cluster $ClusterIP."
+    exit 1
+}
+
+Write-Host "Resizing VM $VMName to $CPUs CPU and $($data.mem_size)GB RAM..."
+
+# Perform the resize
+# Note: Set-NTNXVirtualMachine handles the update via the API
+Set-NTNXVirtualMachine -Vmid $VM.uuid -NumVcpus $CPUs -MemoryMb $MemoryMB | Out-Null
+
+Write-Host "Compute resources updated successfully."
+
+# Disconnect
+Disconnect-NTNXCluster -Servers $ClusterIP | Out-Null
