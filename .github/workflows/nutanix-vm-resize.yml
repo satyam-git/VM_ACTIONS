@@ -24,4 +24,4 @@ jobs:
           PE_PASS: ${{ secrets.PE_Password }}
           INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
-          & "$env:GITHUB_WORKSPACE\Scripts\vm-resize-full.ps1" -JsonInputs $env:INPUTS_JSON
+          & "$env:GITHUB_WORKSPACE\Scripts\vm-resize.ps1" -JsonInputs $env:INPUTS_JSON
