@@ -16,11 +16,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run Resize Script
-        # Using the exact path from your screenshot
-        shell: "C:/Program Files/PowerShell/7/pwsh.exe -Command . {0}"
+        shell: pwsh
         env:
           PE_USER: ${{ secrets.PE_Username }}
           PE_PASS: ${{ secrets.PE_Password }}
           INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
-          & "$env:GITHUB_WORKSPACE\Scripts\vm-resize.ps1" -JsonInputs $env:INPUTS_JSON
+          & "$env:GITHUB_WORKSPACE/Scripts/vm-resize.ps1" -JsonInputs $env:INPUTS_JSON
