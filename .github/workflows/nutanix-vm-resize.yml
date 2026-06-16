@@ -10,7 +10,6 @@ on:
       delay_mins: { description: 'Delay (min)', required: false, default: '0' }
       disk_action: { description: 'Action (add/extend/none)', required: true, default: 'none' }
       size: { description: 'Disk Size (GB)', required: false, default: '0' }
-      DiskAddr: { description: 'Disk Addr (e.g., scsi.0)', required: false }
 
 jobs:
   run-resize:
