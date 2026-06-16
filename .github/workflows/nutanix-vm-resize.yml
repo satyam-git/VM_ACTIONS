@@ -28,4 +28,4 @@ jobs:
           G_PASS: ${{ secrets.Local_Password }}
           INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
-          & "$env:GITHUB_WORKSPACE\Scripts\vm-resize-final.ps1" -JsonInputs $env:INPUTS_JSON
+          & "$env:GITHUB_WORKSPACE\Scripts\vm-resize.ps1" -JsonInputs $env:INPUTS_JSON
