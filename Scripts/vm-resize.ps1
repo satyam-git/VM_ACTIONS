@@ -1,18 +1,30 @@
 param($JsonInputs)
 $data = $JsonInputs | ConvertFrom-Json
-$plinkPath = "Z:\sharecenter\New Automation\plink.exe"
+$plinkPath = "C:\Automation\Tools\plink.exe" 
+# Use the fingerprint from your own error log:
 $fingerprint = "ecdsa-sha2-nistp521@521:q5ZpuCn0QBx0/c7ZDam/Wc/xVkgIOJmSwnD9stm4mQg"
 
-# --- PASS 1: STORAGE (Independent) ---
-try {
-    Write-Host "--- Starting Storage Pass ---" -ForegroundColor Cyan
-    # (Your existing storage logic here...)
-    # REPLACE the plink line with this:
-    # & $plinkPath -batch -ssh -hostkey $fingerprint -pw $row.PE_password "$($row.PE_Username)@$($row.cluster_ip)" $AcliCmd
-} catch {
-    Write-Host "Storage Pass Failed, continuing to Compute..." -ForegroundColor Yellow
+# --- PASS 1: STORAGE (ACLI via Plink) ---
+Write-Host "--- Starting Storage Pass ---" -ForegroundColor Cyan
+if ($data.disk_action -in "add", "extend") {
+    $AcliCmd = if ($data.disk_action -eq "add") { "acli vm.disk_create '$($data.vmname)' container='default-container' create_size='$($data.size_gb)G'" } 
+               else { "acli vm.disk_update '$($data.vmname)' disk_addr='$($data.disk_addr)' new_size='$($data.size_gb)G'" }
+    
+    # Explicitly using -hostkey to bypass the "host key not cached" error
+    $args = @("-batch", "-ssh", "-hostkey", $fingerprint, "-pw", $env:PE_PASS, "$($env:PE_USER)@$($data.pE_IP)", $AcliCmd)
+    
+    $proc = Start-Process -FilePath $plinkPath -ArgumentList $args -Wait -PassThru -NoNewWindow
+    
+    if ($proc.ExitCode -eq 0) {
+        Write-Host "Storage Action Executed Successfully." -ForegroundColor Green
+    } else {
+        # This will now appear in your logs if it fails
+        Write-Error "STORAGE FAILED! Plink Exit Code: $($proc.ExitCode). Ensure $plinkPath exists and the fingerprint is correct."
+    }
 }
 
+# --- PASS 2: COMPUTE ---
+# (Rest of your working compute code remains exactly the same)
 # --- PASS 2: COMPUTE (Independent) ---
 try {
     Write-Host "--- Starting Compute Pass ---" -ForegroundColor Cyan
