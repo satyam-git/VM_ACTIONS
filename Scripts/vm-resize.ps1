@@ -1,43 +1,32 @@
 param($JsonInputs)
 $data = $JsonInputs | ConvertFrom-Json
 
-# Configuration
-$ClusterIP = $data.pE_IP
-$VMName = $data.vmname
-$PE_Username = $env:PE_USER
-$PE_Password = $env:PE_PASS
-$plinkPath = "C:\Automation\Tools\plink.exe"
-
-# 1. Load Nutanix Module
+# 1. Connect to Cluster
+$Pass = $env:PE_PASS | ConvertTo-SecureString -AsPlainText -Force
 if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin | Out-Null }
+Connect-NTNXCluster -Server $data.pE_IP -UserName $env:PE_USER -Password $Pass -AcceptInvalidSSLCerts | Out-Null
 
-# 2. Connect
-$PassSecure = $PE_Password | ConvertTo-SecureString -AsPlainText -Force
-Connect-NTNXCluster -Server $ClusterIP -UserName $PE_Username -Password $PassSecure -AcceptInvalidSSLCerts | Out-Null
-$VM = Get-NTNXVM | Where-Object { $_.vmName -eq $VMName }
+$VM = Get-NTNXVM | Where-Object { $_.vmName -eq $data.vmname }
+if (-not $VM) { Write-Error "VM not found"; exit 1 }
 
-# 3. Storage Pass (ACLI via Plink)
-if ($data.disk_action -in "add", "extend") {
-    $AcliCmd = if ($data.disk_action -eq "add") { "acli vm.disk_create '$VMName' container='default-container' create_size='$($data.size)G'" } 
-               else { "acli vm.disk_update '$VMName' disk_addr='$($data.DiskAddr)' new_size='$($data.size)G'" }
-    
-    Write-Host "Executing Storage Action: $AcliCmd"
-    $plinkArgs = @("-batch", "-ssh", "-pw", $PE_Password, "$PE_Username@$ClusterIP", $AcliCmd)
-    Start-Process -FilePath $plinkPath -ArgumentList $plinkArgs -Wait -NoNewWindow
+# 2. Storage Actions (Native Cmdlets instead of plink/acli)
+if ($data.disk_action -eq "add") {
+    Write-Host "Adding disk..."
+    New-NTNXVirtualDisk -Vmid $VM.uuid -DiskSize ($data.size * 1024 * 1024 * 1024) | Out-Null
 }
 
-# 4. Compute Pass (Native API)
+# 3. Compute Actions
 if ($data.delay_mins -gt 0) { Start-Sleep -Seconds ($data.delay_mins * 60) }
 
-Write-Host "Shutting down for Compute update..."
+Write-Host "Shutting down VM $($data.vmname)..."
 Set-NTNXVMPowerState -Vmid $VM.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
 Start-Sleep -Seconds 60
 
-Write-Host "Updating CPU/RAM..."
+Write-Host "Resizing VM: $($data.CPU_size) CPU, $($data.mem_size) GB RAM..."
 Set-NTNXVirtualMachine -Vmid $VM.uuid -NumVcpus ([int]$data.CPU_size) -MemoryMb ([int]$data.mem_size * 1024) -ErrorAction Stop | Out-Null
 
-Write-Host "Powering on..."
-Set-NTNXVMPowerState -Vmid $VM.uuid -Transition ON | Out-Null
+Write-Host "Powering on VM..."
+Set-NTNXVMPowerState -Vmid $VM.uuid -Transition ON -ErrorAction Stop | Out-Null
 
-Disconnect-NTNXCluster -Servers $ClusterIP | Out-Null
-Write-Host "Resize completed successfully."
+Disconnect-NTNXCluster -Servers $data.pE_IP | Out-Null
+Write-Host "Resize Completed Successfully."
