@@ -26,13 +26,29 @@ if ($data.disk_action -eq "add") {
     $currentVm = Invoke-RestMethod -Uri "$urlBase/vms/$vmUuid" -Method Get -Headers $headers
     $spec = $currentVm.spec
     
-    # Modify disk list
-    $newDisk = @{ device_properties = @{ device_type = "DISK"; disk_address = @{ adapter_type = "SCSI" } }; disk_size_bytes = $diskBytes }
+    # CALCULATE NEXT DEVICE INDEX
+    # Look at existing disks to find the highest index and add 1
+    $maxIndex = 0
+    foreach ($disk in $spec.resources.disk_list) {
+        if ($disk.device_properties.disk_address.device_index -gt $maxIndex) {
+            $maxIndex = $disk.device_properties.disk_address.device_index
+        }
+    }
+    $newIndex = $maxIndex + 1
+    
+    # Add new disk with explicit device_index
+    $newDisk = @{ 
+        device_properties = @{ 
+            device_type = "DISK"; 
+            disk_address = @{ adapter_type = "SCSI"; device_index = $newIndex } 
+        }; 
+        disk_size_bytes = $diskBytes 
+    }
     $spec.resources.disk_list += $newDisk
     
     $body = @{ spec = $spec; api_version = "3.1"; metadata = $currentVm.metadata } | ConvertTo-Json -Depth 10
     Invoke-RestMethod -Uri "$urlBase/vms/$vmUuid" -Method Put -Headers $headers -Body $body
-    Write-Host "Storage Success." -ForegroundColor Green
+    Write-Host "Storage Added at index $newIndex." -ForegroundColor Green
 }
 
 # --- 3. COMPUTE (REST API) ---
@@ -42,4 +58,4 @@ $spec.resources.memory_size_mib = [int]$data.mem_size * 1024
 
 $body = @{ spec = $spec; api_version = "3.1"; metadata = $currentVm.metadata } | ConvertTo-Json -Depth 10
 Invoke-RestMethod -Uri "$urlBase/vms/$vmUuid" -Method Put -Headers $headers -Body $body
-Write-Host "Compute Success." -ForegroundColor Green
+Write-Host "Compute Updated." -ForegroundColor Green
