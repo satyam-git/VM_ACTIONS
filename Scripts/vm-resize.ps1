@@ -6,7 +6,7 @@ $base64Auth = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.Get
 $headers = @{ "Authorization" = "Basic $base64Auth"; "Content-Type" = "application/json" }
 $urlBase = "https://$($data.pE_IP):9440/api/nutanix/v3"
 
-# Bypass SSL certificates for internal Nutanix clusters
+# Bypass SSL certificates for internal API requests
 [System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
 
 # --- 1. FIND VM ---
@@ -14,21 +14,21 @@ Write-Host "Finding VM: $($data.vmname)..."
 $vmList = Invoke-RestMethod -Uri "$urlBase/vms/list" -Method Post -Headers $headers -Body '{"kind":"vm"}'
 $vm = ($vmList.entities | Where-Object { $_.spec.name -eq $data.vmname } | Select-Object -First 1)
 
-if (-not $vm) { Write-Error "VM '$($data.vmname)' not found on cluster $($data.pE_IP)"; exit 1 }
+if (-not $vm) { Write-Error "VM '$($data.vmname)' not found."; exit 1 }
 $vmUuid = $vm.metadata.uuid
-
-# Get current full spec
 $currentVm = Invoke-RestMethod -Uri "$urlBase/vms/$vmUuid" -Method Get -Headers $headers
 
-# --- 2. STORAGE (Add Disk if requested) ---
+# --- 2. STORAGE (Add Disk) ---
 if ($data.disk_action -eq "add") {
     Write-Host "Adding disk of $($data.size_gb) GB..."
     $diskBytes = [Int64]$data.size_gb * 1024 * 1024 * 1024
     
-    # Calculate next disk index
+    # Calculate next device_index
     $maxIndex = 0
     foreach ($d in $currentVm.spec.resources.disk_list) {
-        if ($d.device_properties.disk_address.device_index -gt $maxIndex) { $maxIndex = $d.device_properties.disk_address.device_index }
+        if ($d.device_properties.disk_address.device_index -gt $maxIndex) { 
+            $maxIndex = $d.device_properties.disk_address.device_index 
+        }
     }
     
     $newDisk = @{ 
@@ -36,7 +36,7 @@ if ($data.disk_action -eq "add") {
         disk_size_bytes = $diskBytes 
     }
     $currentVm.spec.resources.disk_list += $newDisk
-    Write-Host "Prepared disk at index $($maxIndex + 1)."
+    Write-Host "Disk prepared at index $($maxIndex + 1)."
 }
 
 # --- 3. COMPUTE (Resize) ---
