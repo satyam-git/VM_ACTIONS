@@ -1,0 +1,32 @@
+name: Nutanix VM Resize
+
+on:
+  workflow_dispatch:
+    inputs:
+      # Slot 1
+      v1: { description: '1: VM Name', required: true }
+      c1: { description: '1: CPU', required: true }
+      m1: { description: '1: Mem(GB)', required: true }
+      a1: { description: '1: Disk Action', required: false, type: choice, options: [None, add, extend] }
+      s1: { description: '1: SizeGB', required: false, default: '0' }
+      ad1: { description: '1: DiskAddr', required: false }
+      dr1: { description: '1: DriveLetter', required: false }
+      del1: { description: '1: Delay(min)', required: false, default: '0' }
+      # Repeat v2/c2... for Slot 2 and 3 if needed
+
+jobs:
+  run-resize:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Resize Automation
+        shell: powershell
+        env:
+          # Map your Secrets here
+          PE_USER: ${{ secrets.PE_Username }}
+          PE_PASS: ${{ secrets.PE_Password }}
+          GUEST_USER: ${{ secrets.Local_Username }}
+          GUEST_PASS: ${{ secrets.Local_Password }}
+          INPUTS_JSON: ${{ toJson(github.event.inputs) }}
+        run: |
+          & "$env:GITHUB_WORKSPACE\Scripts\vm-resize.ps1" -JsonInputs $env:INPUTS_JSON
