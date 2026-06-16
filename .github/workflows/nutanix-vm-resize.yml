@@ -11,8 +11,6 @@ on:
       disk_action: { description: 'Action (add/extend/none)', required: true, default: 'none' }
       size_gb: { description: 'Size (GB)', required: false, default: '0' }
       disk_addr: { description: 'Disk Addr (e.g., scsi.0)', required: false }
-      guest_ip: { description: 'Guest IP', required: true }
-      drive_letter: { description: 'Drive Letter', required: true }
 
 jobs:
   run-resize:
@@ -24,8 +22,6 @@ jobs:
         env:
           PE_USER: ${{ secrets.PE_Username }}
           PE_PASS: ${{ secrets.PE_Password }}
-          G_USER: ${{ secrets.Local_Username }}
-          G_PASS: ${{ secrets.Local_Password }}
           INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
           & "$env:GITHUB_WORKSPACE\Scripts\vm-resize.ps1" -JsonInputs $env:INPUTS_JSON
