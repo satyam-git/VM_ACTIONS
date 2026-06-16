@@ -16,7 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run Resize Script
-        shell: powershell
+        # Using the exact path from your screenshot
+        shell: "C:/Program Files/PowerShell/7/pwsh.exe -Command . {0}"
         env:
           PE_USER: ${{ secrets.PE_Username }}
           PE_PASS: ${{ secrets.PE_Password }}
