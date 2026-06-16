@@ -2,6 +2,9 @@ param($JsonInputs)
 $data = $JsonInputs | ConvertFrom-Json
 $plinkPath = "C:\Automation\Tools\plink.exe" 
 
+# Use the exact fingerprint from your error log
+$fingerprint = "ecdsa-sha2-nistp521@521:q5ZpuCn0QBx0/c7ZDam/Wc/xVkgIOJmSwnD9stm4mQg"
+
 $row = [PSCustomObject]@{
     vmname            = $data.vmname
     cluster_ip        = $data.cluster_ip
@@ -25,8 +28,9 @@ Connect-NTNXCluster -Server $row.cluster_ip -UserName $row.PE_Username -Password
 if ($row.Disk_Action -in "add", "extend") {
     $AcliCmd = if ($row.Disk_Action -eq "add") { "acli vm.disk_create '$($row.vmname)' container='default-container' create_size='$($row.SizeGB)G'" } else { "acli vm.disk_update '$($row.vmname)' disk_addr='$($row.DiskAddr)' new_size='$($row.SizeGB)G'" }
     
-    # Executing Plink using the cached registry key (No hostkey flag needed)
-    $process = Start-Process -FilePath $plinkPath -ArgumentList "-batch", "-ssh", "-pw", $row.PE_password, "$($row.PE_Username)@$($row.cluster_ip)", $AcliCmd -Wait -PassThru -NoNewWindow
+    # Use -hostkey to bypass cache, -batch to prevent prompts
+    $plinkArgs = @("-batch", "-ssh", "-hostkey", $fingerprint, "-pw", $row.PE_password, "$($row.PE_Username)@$($row.cluster_ip)", $AcliCmd)
+    $process = Start-Process -FilePath $plinkPath -ArgumentList $plinkArgs -Wait -PassThru -NoNewWindow
     if ($process.ExitCode -ne 0) { throw "Plink failed with exit code $($process.ExitCode)" }
     
     $gCred = New-Object System.Management.Automation.PSCredential($row.Guest_Username, ($row.Guest_Password | ConvertTo-SecureString -AsPlainText -Force))
