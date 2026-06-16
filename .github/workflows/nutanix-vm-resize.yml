@@ -1,4 +1,4 @@
-name: Nutanix VM Resize
+name: Nutanix VM Resize (Compute Only)
 
 on:
   workflow_dispatch:
