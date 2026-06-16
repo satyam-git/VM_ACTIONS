@@ -16,8 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run Resize Script
-        # Using pwsh (PowerShell 7) for reliability and modern JSON support
-        shell: pwsh
+        # Use the full path to your PowerShell 7 executable
+        shell: "C:/Program Files/PowerShell/7/pwsh.exe -Command . {0}"
         env:
           PE_USER: ${{ secrets.PE_Username }}
           PE_PASS: ${{ secrets.PE_Password }}
