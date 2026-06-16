@@ -8,17 +8,20 @@ on:
       CPU_size: { description: 'CPU Cores', required: true }
       mem_size: { description: 'Memory (GB)', required: true }
       delay_mins: { description: 'Delay (min)', required: false, default: '0' }
+      disk_action: { description: 'Action (add/extend/none)', required: true, default: 'none' }
+      size: { description: 'Disk Size (GB)', required: false, default: '0' }
+      DiskAddr: { description: 'Disk Addr (e.g., scsi.0)', required: false }
 
 jobs:
-  run-compute-resize:
+  run-resize:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-      - name: Run Compute Resize
+      - name: Run Resize Script
         shell: powershell
         env:
           PE_USER: ${{ secrets.PE_Username }}
           PE_PASS: ${{ secrets.PE_Password }}
           INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
-          & "$env:GITHUB_WORKSPACE\Scripts\vm-resize.ps1" -JsonInputs $env:INPUTS_JSON
+          & "$env:GITHUB_WORKSPACE\Scripts\vm-resize-full.ps1" -JsonInputs $env:INPUTS_JSON
