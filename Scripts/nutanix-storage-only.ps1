@@ -1,49 +1,38 @@
-#Requires -Version 5.1
-$ErrorActionPreference = 'Stop'
+param($JsonInputs)
+$data = $JsonInputs | ConvertFrom-Json
 
-function Ensure-NutanixModules {
-    # Ensure the required module is loaded
-    if (-not (Get-Module -Name Nutanix.Cmdlets -ListAvailable)) {
-        Write-Error "Nutanix PowerShell module not found on the runner."
-        exit 1
-    }
-    Import-Module Nutanix.Cmdlets
+# --- CONNECTION MAPPING ---
+$siteMap = @{
+    "Banglore" = "192.168.136.50"
+    "Chennai"  = "10.0.0.10"
 }
 
-function Add-NutanixDisk {
-    param($VmName, $SizeGB)
-    
-    # Locate the VM
-    $vm = Get-NTNXVM | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
-    if (-not $vm) { throw "VM '$VmName' not found" }
-
-    $vmId = ($vm.vmid -split ':')[-1]
-    
-    # Define disk creation specifications
-    $diskCreateSpec = New-NTNXObject -Name VmDiskSpecCreateDTO
-    $diskCreateSpec.sizeMb = [int]$SizeGB * 1024
-
-    $vmDisk = New-NTNXObject -Name VMDiskDTO
-    $vmDisk.vmDiskCreate = $diskCreateSpec
-
-    # Execute disk addition
-    Add-NTNXVMDisk -Vmid $vmId -Disks $vmDisk
-    Write-Host "Success: Added ${SizeGB}GB to '$VmName'" -ForegroundColor Green
+# --- INITIALIZATION ---
+if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { 
+    Add-PSSnapin NutanixCmdletsPSSnapin 
 }
 
-# --- MAIN EXECUTION ---
-Ensure-NutanixModules
-
-# Connect to the cluster using environment variables
-$pass = $env:PE_PASS | ConvertTo-SecureString -AsPlainText -Force
-Connect-NTNXCluster -Server $env:PE_IP -UserName $env:PE_USER -Password $pass -AcceptInvalidSSLCerts | Out-Null
+$ip = $siteMap[$data.site]
+$creds = $env:NUTANIX_PASS | ConvertTo-SecureString -AsPlainText -Force
 
 try {
-    # Strictly handle disk actions; no compute parameters are defined or used here
-    if ($env:DISK_ACTION -eq 'add') {
-        Add-NutanixDisk -VmName $env:VM_NAME -SizeGB ([int]$env:DISK_SIZE)
-    } else {
-        Write-Host "No disk action requested." -ForegroundColor Yellow
+    Connect-NTNXCluster -Server $ip -UserName $env:NUTANIX_USER -Password $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
+    
+    $vm = Get-NTNXVM | Where-Object { $_.vmName -eq $data.vmname } | Select-Object -First 1
+    if (-not $vm) { throw "VM '$($data.vmname)' not found." }
+
+    # --- STORAGE ACTION ---
+    if ($data.disk_action -eq "add") {
+        $vmId = ($vm.vmid -split ':')[-1]
+        
+        $diskCreateSpec = New-NTNXObject -Name VmDiskSpecCreateDTO
+        $diskCreateSpec.sizeMb = [int]$data.disksize * 1024
+
+        $vmDisk = New-NTNXObject -Name VMDiskDTO
+        $vmDisk.vmDiskCreate = $diskCreateSpec
+
+        Add-NTNXVMDisk -Vmid $vmId -Disks $vmDisk
+        Write-Host "Success: Added $($data.disksize)GB disk to $($data.vmname)." -ForegroundColor Green
     }
 }
 catch {
@@ -51,5 +40,5 @@ catch {
     exit 1
 }
 finally {
-    Disconnect-NTNXCluster -Servers $env:PE_IP -ErrorAction SilentlyContinue | Out-Null
+    Disconnect-NTNXCluster -Servers $ip -ErrorAction SilentlyContinue
 }
