@@ -24,10 +24,16 @@ on:
         required: true
         type: string
       DiskAddr:
-        description: "Existing disk address. Required only when disk_action is extend."
-        required: false
-        default: ""
-        type: string
+        description: "Existing disk address. Select none when disk_action is add."
+        required: true
+        default: "none"
+        type: choice
+        options:
+          - none
+          - scsi.0
+          - scsi.1
+          - scsi.2
+          - scsi.3
 
 jobs:
   provision-disk:
