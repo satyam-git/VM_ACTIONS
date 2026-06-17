@@ -44,14 +44,18 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Posh-SSH
-        shell: pwsh
+        shell: powershell
         run: |
+          $ErrorActionPreference = "Stop"
+
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+
           if (-not (Get-Module -ListAvailable -Name Posh-SSH)) {
             Install-Module Posh-SSH -Scope CurrentUser -Force
           }
 
       - name: Add or extend Nutanix VM disk
-        shell: pwsh
+        shell: powershell
         env:
           PE_USERNAME: ${{ secrets.PE_USERNAME }}
           PE_PASSWORD: ${{ secrets.PE_PASSWORD }}
