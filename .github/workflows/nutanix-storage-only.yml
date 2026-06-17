@@ -1,23 +1,49 @@
-name: Nutanix Storage Only
+name: Nutanix Disk Provisioning
 
 on:
   workflow_dispatch:
     inputs:
-      site: { description: 'Site (Banglore/Chennai)', required: true }
-      vmname: { description: 'VM Name', required: true }
-      disk_action: { description: 'Action (add/none)', required: true, default: 'none' }
-      disksize: { description: 'Disk Size (GB)', required: false, default: '0' }
+      pe_ip:
+        description: "Nutanix Prism Element / CVM IP"
+        required: true
+        type: string
+      vmname:
+        description: "Nutanix VM name"
+        required: true
+        type: string
+      SizeGB:
+        description: "Disk size in GB. For add: new disk size. For extend: final disk size."
+        required: true
+        type: string
+      DiskAddr:
+        description: "Existing disk address for extend. Leave blank to add a new disk."
+        required: false
+        default: ""
+        type: string
 
 jobs:
-  run-storage:
+  provision-disk:
     runs-on: self-hosted
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Run Storage Script
-        shell: powershell
-        env:
-          NUTANIX_USER: ${{ secrets.NUTANIX_USER }}
-          NUTANIX_PASS: ${{ secrets.NUTANIX_PASS }}
-          INPUTS_JSON: ${{ toJson(github.event.inputs) }}
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Posh-SSH
+        shell: pwsh
         run: |
-          & "$env:GITHUB_WORKSPACE\Scripts\nutanix-storage-only.ps1" -JsonInputs $env:INPUTS_JSON
+          if (-not (Get-Module -ListAvailable -Name Posh-SSH)) {
+            Install-Module Posh-SSH -Scope CurrentUser -Force
+          }
+
+      - name: Add or extend Nutanix VM disk
+        shell: pwsh
+        env:
+          PE_USERNAME: ${{ secrets.PE_USERNAME }}
+          PE_PASSWORD: ${{ secrets.PE_PASSWORD }}
+        run: |
+          & "$env:GITHUB_WORKSPACE\Scripts\diskprovisioning.ps1" `
+            -pe_ip "${{ inputs.pe_ip }}" `
+            -vmname "${{ inputs.vmname }}" `
+            -SizeGB "${{ inputs.SizeGB }}" `
+            -DiskAddr "${{ inputs.DiskAddr }}"
