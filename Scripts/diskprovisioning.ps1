@@ -22,9 +22,6 @@ $ErrorActionPreference = "Stop"
 
 Import-Module Posh-SSH -ErrorAction Stop
 
-[System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
-
 if ([string]::IsNullOrWhiteSpace($env:PE_USERNAME)) {
     throw "Missing GitHub secret: PE_USERNAME"
 }
@@ -58,35 +55,6 @@ function ConvertTo-AcliQuotedValue {
     return "'$Value'"
 }
 
-function Invoke-NutanixRest {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Server,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Username,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Password,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    $encodedCredential = [Convert]::ToBase64String(
-        [Text.Encoding]::ASCII.GetBytes("${Username}:$Password")
-    )
-
-    $headers = @{
-        Authorization = "Basic $encodedCredential"
-        Accept        = "application/json"
-    }
-
-    $uri = "https://$Server`:9440/PrismGateway/services/rest/v2.0/$Path"
-
-    return Invoke-RestMethod -Method Get -Uri $uri -Headers $headers -ErrorAction Stop
-}
-
 function Get-NutanixUsageStat {
     param(
         [Parameter(Mandatory = $true)]
@@ -96,5 +64,36 @@ function Get-NutanixUsageStat {
         [string]$Key
     )
 
-    if ($Container.usageStats -and $null -ne $Container.usageStats.$Key) {
-        return [double]$Container.usageStats.$Key
+    if ($Container.usageStats) {
+        $usageStats = $Container.usageStats
+    }
+    elseif ($Container.usage_stats) {
+        $usageStats = $Container.usage_stats
+    }
+    else {
+        return 0
+    }
+
+    if ($usageStats -is [hashtable] -and $usageStats.ContainsKey($Key)) {
+        return [double]$usageStats[$Key]
+    }
+
+    $property = $usageStats.PSObject.Properties[$Key]
+    if ($null -ne $property -and $null -ne $property.Value) {
+        return [double]$property.Value
+    }
+
+    return 0
+}
+
+function Connect-NutanixClusterForCmdlets {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Server,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Username,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Password
+    )
