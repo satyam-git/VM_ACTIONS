@@ -1,0 +1,32 @@
+name: Nutanix Unified Management
+
+on:
+  workflow_dispatch:
+    inputs:
+      pe_ip: { description: "Prism Element IP", required: true }
+      vmname: { description: "VM Name", required: true }
+      cpu: { description: "CPU Cores", required: false, default: '0' }
+      memory: { description: "Memory GB", required: false, default: '0' }
+      disk_action: { description: "Disk Action", required: false, type: choice, options: [none, add, extend] }
+      disk_size: { description: "Disk Size (GB)", required: false, default: '0' }
+      disk_addr: { description: "Disk Address", required: false, type: choice, options: [none, scsi.0, scsi.1, scsi.2, scsi.3, scsi.4] }
+      vm_fqdn: { description: "VM FQDN (for Guest OS)", required: false }
+      drive_letter: { description: "Drive Letter", required: false }
+
+jobs:
+  manage-vm:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - name: Execute Management
+        shell: powershell
+        env:
+          PE_USER: ${{ secrets.PE_Username }}
+          PE_PASS: ${{ secrets.PE_Password }}
+        run: |
+          $inputJson = @{
+            pe_ip = "${{ inputs.pe_ip }}"; vmname = "${{ inputs.vmname }}"; cpu = "${{ inputs.cpu }}"
+            mem = "${{ inputs.memory }}"; d_action = "${{ inputs.disk_action }}"; d_size = "${{ inputs.disk_size }}"
+            d_addr = "${{ inputs.disk_addr }}"; fqdn = "${{ inputs.vm_fqdn }}"; drive = "${{ inputs.drive_letter }}"
+          } | ConvertTo-Json
+          & "$env:GITHUB_WORKSPACE\Scripts\unified-manage.ps1" -JsonInputs $inputJson
