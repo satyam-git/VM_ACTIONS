@@ -1,0 +1,95 @@
+name: Nutanix VM Operations
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Operation"
+        required: true
+        type: choice
+        options:
+          - compute
+          - storage
+
+      vmname:
+        description: "VM Name"
+        required: true
+        type: string
+
+      pE_IP:
+        description: "Cluster IP (Compute)"
+        required: false
+        type: string
+
+      CPU_size:
+        description: "CPU Cores"
+        required: false
+        type: string
+
+      mem_size:
+        description: "Memory GB"
+        required: false
+        type: string
+
+      delay_mins:
+        description: "Delay Minutes"
+        required: false
+        default: "0"
+        type: string
+
+      pe_ip:
+        description: "PE/CVM IP (Storage)"
+        required: false
+        type: string
+
+      disk_action:
+        description: "Disk Action"
+        required: false
+        type: choice
+        options:
+          - add
+          - extend
+
+      SizeGB:
+        description: "Disk Size GB"
+        required: false
+        type: string
+
+      DiskAddr:
+        description: "Disk Address"
+        required: false
+        type: choice
+        options:
+          - none
+          - scsi.0
+          - scsi.1
+          - scsi.2
+          - scsi.3
+          - scsi.4
+
+      GuestIP:
+        description: "Guest FQDN"
+        required: false
+        type: string
+
+      DriveLetter:
+        description: "Drive Letter"
+        required: false
+        type: string
+
+jobs:
+  run-operation:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Operation
+        shell: powershell
+        env:
+          PE_USERNAME: ${{ secrets.PE_USERNAME }}
+          PE_PASSWORD: ${{ secrets.PE_PASSWORD }}
+          LOCAL_USERNAME: ${{ secrets.LOCAL_USERNAME }}
+          LOCAL_PASSWORD: ${{ secrets.LOCAL_PASSWORD }}
+          INPUTS_JSON: ${{ toJson(github.event.inputs) }}
+        run: |
+          & "$env:GITHUB_WORKSPACE\Scripts\nutanix-vm-operations.ps1" -JsonInputs $env:INPUTS_JSON
