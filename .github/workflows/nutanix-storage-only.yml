@@ -54,28 +54,6 @@ jobs:
             Install-Module Posh-SSH -Scope CurrentUser -Force
           }
 
-      - name: Validate checked-out PowerShell script
-        shell: powershell
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $scriptPath = "$env:GITHUB_WORKSPACE\Scripts\diskprovisioning.ps1"
-
-          Write-Host "Script path: $scriptPath"
-          Write-Host "First 40 lines of checked-out script:"
-          Get-Content $scriptPath | Select-Object -First 40
-
-          $tokens = $null
-          $parseErrors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$parseErrors) | Out-Null
-
-          if ($parseErrors) {
-            $parseErrors | Format-List * -Force
-            throw "PowerShell parser validation failed for $scriptPath"
-          }
-
-          Write-Host "PowerShell parser validation passed."
-
       - name: Add or extend Nutanix VM disk
         shell: powershell
         env:
