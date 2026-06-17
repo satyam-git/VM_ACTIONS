@@ -11,12 +11,20 @@ on:
         description: "Nutanix VM name"
         required: true
         type: string
+      disk_action:
+        description: "Disk action"
+        required: true
+        default: "add"
+        type: choice
+        options:
+          - add
+          - extend
       SizeGB:
         description: "Disk size in GB. For add: new disk size. For extend: final disk size."
         required: true
         type: string
       DiskAddr:
-        description: "Existing disk address for extend. Leave blank to add a new disk."
+        description: "Existing disk address. Required only when disk_action is extend."
         required: false
         default: ""
         type: string
@@ -45,5 +53,6 @@ jobs:
           & "$env:GITHUB_WORKSPACE\Scripts\diskprovisioning.ps1" `
             -pe_ip "${{ inputs.pe_ip }}" `
             -vmname "${{ inputs.vmname }}" `
+            -disk_action "${{ inputs.disk_action }}" `
             -SizeGB "${{ inputs.SizeGB }}" `
             -DiskAddr "${{ inputs.DiskAddr }}"
