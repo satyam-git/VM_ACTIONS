@@ -20,7 +20,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "diskprovisioning.ps1 version: 2026-06-17-cmdlets-simple-v4"
+Write-Host "diskprovisioning.ps1 version: 2026-06-17-cmdlets-pipeline-v5"
 
 Import-Module Posh-SSH -ErrorAction Stop
 
@@ -62,39 +62,39 @@ if ($disk_action -eq "add") {
     $securePePassword = ConvertTo-SecureString $env:PE_PASSWORD -AsPlainText -Force
 
     Write-Host "Connecting to Nutanix PE with Nutanix cmdlets: $pe_ip"
-
     Connect-NTNXCluster -Server $pe_ip -UserName $env:PE_USERNAME -Password $securePePassword -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
 
-    $cluster = Get-NTNXCluster -ErrorAction Stop
-    $clusterName = $cluster.name
+    $clusterDetails = Get-NTNXCluster -ErrorAction Stop
+    $clusterName = $clusterDetails.name
 
     if ([string]::IsNullOrWhiteSpace($clusterName)) {
         Disconnect-NTNXCluster -Servers $pe_ip -ErrorAction SilentlyContinue | Out-Null
         throw "Unable to read Nutanix cluster name."
     }
 
-    $prefixLength = [Math]::Min(3, $clusterName.Length)
-    $containerPrefix = $clusterName.Substring(0, $prefixLength)
+    $prefix = $clusterName.Substring(0, [math]::Min(3, $clusterName.Length))
 
     Write-Host "Cluster name: $clusterName"
-    Write-Host "Container prefix: $containerPrefix"
+    Write-Host "Container prefix: $prefix"
 
-    $candidateContainers = @()
-    $containers = @(Get-NTNXContainer -ErrorAction Stop)
+    $best = Get-NTNXContainer -ErrorAction Stop |
+        Where-Object {
+            $n = if ($_.name) { $_.name } else { $_.containerName }
+            $n -like "$prefix*" -and $n -notmatch "NutanixManagementShare|NutaniXFitInstance|default-container"
+        } |
+        Select-Object *,
+            @{
+                Name = "FreePct"
+                Expression = {
+                    $cap = [double]$_.usageStats.'storage.capacity_bytes'
+                    $use = [double]$_.usageStats.'storage.usage_bytes'
 
-    foreach ($container in $containers) {
-        $containerName = $container.name
-
-        if ([string]::IsNullOrWhiteSpace($containerName)) {
-            $containerName = $container.containerName
-        }
-
-        if (-not [string]::IsNullOrWhiteSpace($containerName)) {
-            if ($containerName -like "$containerPrefix*") {
-                if ($containerName -notmatch "NutanixManagementShare|NutaniXFitInstance|default-container") {
-                    $capacityBytes = 0
-                    $usedBytes = 0
-                    $usageStats = $container.usageStats
-
-                    if ($null -eq $usageStats) {
-                        $usageStats = $container.usage_stats
+                    if ($cap -gt 0) {
+                        (($cap - $use) / $cap) * 100
+                    }
+                    else {
+                        0
+                    }
+                }
+            } |
+        Sort-Object FreePct -Descending |
