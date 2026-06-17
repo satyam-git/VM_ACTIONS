@@ -14,12 +14,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run Storage Script
-        # We use standard PowerShell to support the Nutanix Cmdlets/Snapins
         shell: powershell
         env:
           PE_USER: ${{ secrets.PE_Username }}
           PE_PASS: ${{ secrets.PE_Password }}
-          # Passing inputs as environment variables for the script
           PE_IP: ${{ github.event.inputs.pE_IP }}
           VM_NAME: ${{ github.event.inputs.vmname }}
           DISK_ACTION: ${{ github.event.inputs.disk_action }}
