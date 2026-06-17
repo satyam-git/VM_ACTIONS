@@ -1,44 +1,122 @@
-param($JsonInputs)
-$data = $JsonInputs | ConvertFrom-Json
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$pe_ip,
 
-# --- CONNECTION MAPPING ---
-$siteMap = @{
-    "Banglore" = "192.168.136.50"
-    "Chennai"  = "10.0.0.10"
+    [Parameter(Mandatory = $true)]
+    [string]$vmname,
+
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^\d+$')]
+    [string]$SizeGB,
+
+    [Parameter(Mandatory = $false)]
+    [string]$DiskAddr = ""
+)
+
+$ErrorActionPreference = "Stop"
+
+Import-Module Posh-SSH -ErrorAction Stop
+
+if ([string]::IsNullOrWhiteSpace($env:PE_USERNAME)) {
+    throw "Missing GitHub secret: PE_USERNAME"
 }
 
-# --- INITIALIZATION ---
-if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { 
-    Add-PSSnapin NutanixCmdletsPSSnapin 
+if ([string]::IsNullOrWhiteSpace($env:PE_PASSWORD)) {
+    throw "Missing GitHub secret: PE_PASSWORD"
 }
 
-$ip = $siteMap[$data.site]
-$creds = $env:NUTANIX_PASS | ConvertTo-SecureString -AsPlainText -Force
+if ([int]$SizeGB -le 0) {
+    throw "SizeGB must be greater than 0."
+}
 
-try {
-    Connect-NTNXCluster -Server $ip -UserName $env:NUTANIX_USER -Password $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
-    
-    $vm = Get-NTNXVM | Where-Object { $_.vmName -eq $data.vmname } | Select-Object -First 1
-    if (-not $vm) { throw "VM '$($data.vmname)' not found." }
+function ConvertTo-AcliQuotedValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
 
-    # --- STORAGE ACTION ---
-    if ($data.disk_action -eq "add") {
-        $vmId = ($vm.vmid -split ':')[-1]
-        
-        $diskCreateSpec = New-NTNXObject -Name VmDiskSpecCreateDTO
-        $diskCreateSpec.sizeMb = [int]$data.disksize * 1024
+    if ($Value.Contains("'")) {
+        throw "Single quote is not supported in ACLI argument value: $Value"
+    }
 
-        $vmDisk = New-NTNXObject -Name VMDiskDTO
-        $vmDisk.vmDiskCreate = $diskCreateSpec
+    return "'$Value'"
+}
 
-        Add-NTNXVMDisk -Vmid $vmId -Disks $vmDisk
-        Write-Host "Success: Added $($data.disksize)GB disk to $($data.vmname)." -ForegroundColor Green
+function Invoke-NutanixAcli {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Server,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Username,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Password,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Command
+    )
+
+    $securePassword = ConvertTo-SecureString $Password -AsPlainText -Force
+    $credential = [pscredential]::new($Username, $securePassword)
+    $session = $null
+
+    try {
+        Write-Host "Connecting to Nutanix PE/CVM: $Server"
+
+        $session = New-SSHSession `
+            -ComputerName $Server `
+            -Credential $credential `
+            -AcceptKey `
+            -ErrorAction Stop
+
+        Write-Host "Running ACLI command:"
+        Write-Host $Command
+
+        $result = Invoke-SSHCommand `
+            -SessionId $session.SessionId `
+            -Command $Command `
+            -TimeOut 600 `
+            -ErrorAction Stop
+
+        if ($result.Output) {
+            $result.Output | ForEach-Object { Write-Host $_ }
+        }
+
+        if ($result.Error) {
+            $result.Error | ForEach-Object { Write-Error $_ }
+        }
+
+        if ($result.ExitStatus -ne 0) {
+            throw "ACLI command failed with exit code $($result.ExitStatus)."
+        }
+    }
+    finally {
+        if ($null -ne $session) {
+            Remove-SSHSession -SessionId $session.SessionId | Out-Null
+        }
     }
 }
-catch {
-    Write-Error "Storage operation failed: $($_.Exception.Message)"
-    exit 1
+
+$quotedVmName = ConvertTo-AcliQuotedValue -Value $vmname
+$sizeValue = ConvertTo-AcliQuotedValue -Value "$($SizeGB)G"
+
+if ([string]::IsNullOrWhiteSpace($DiskAddr)) {
+    Write-Host "DiskAddr is blank. Action selected: ADD disk."
+
+    $acliCommand = "acli vm.disk_create $quotedVmName create_size=$sizeValue"
 }
-finally {
-    Disconnect-NTNXCluster -Servers $ip -ErrorAction SilentlyContinue
+else {
+    Write-Host "DiskAddr provided. Action selected: EXTEND disk."
+
+    $quotedDiskAddr = ConvertTo-AcliQuotedValue -Value $DiskAddr
+    $acliCommand = "acli vm.disk_update $quotedVmName disk_addr=$quotedDiskAddr new_size=$sizeValue"
 }
+
+Invoke-NutanixAcli `
+    -Server $pe_ip `
+    -Username $env:PE_USERNAME `
+    -Password $env:PE_PASSWORD `
+    -Command $acliCommand
+
+Write-Host "Nutanix PE disk provisioning completed successfully."
