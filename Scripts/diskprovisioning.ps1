@@ -20,7 +20,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "diskprovisioning.ps1 version: 2026-06-17-cmdlets-simple-v3"
+Write-Host "diskprovisioning.ps1 version: 2026-06-17-cmdlets-simple-v4"
 
 Import-Module Posh-SSH -ErrorAction Stop
 
@@ -61,39 +61,40 @@ if ($disk_action -eq "add") {
 
     $securePePassword = ConvertTo-SecureString $env:PE_PASSWORD -AsPlainText -Force
 
-    try {
-        Write-Host "Connecting to Nutanix PE with Nutanix cmdlets: $pe_ip"
+    Write-Host "Connecting to Nutanix PE with Nutanix cmdlets: $pe_ip"
 
-        Connect-NTNXCluster `
-            -Server $pe_ip `
-            -UserName $env:PE_USERNAME `
-            -Password $securePePassword `
-            -AcceptInvalidSSLCerts `
-            -ErrorAction Stop | Out-Null
+    Connect-NTNXCluster -Server $pe_ip -UserName $env:PE_USERNAME -Password $securePePassword -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
 
-        $cluster = Get-NTNXCluster -ErrorAction Stop
-        $clusterName = $cluster.name
+    $cluster = Get-NTNXCluster -ErrorAction Stop
+    $clusterName = $cluster.name
 
-        if ([string]::IsNullOrWhiteSpace($clusterName)) {
-            throw "Unable to read Nutanix cluster name."
+    if ([string]::IsNullOrWhiteSpace($clusterName)) {
+        Disconnect-NTNXCluster -Servers $pe_ip -ErrorAction SilentlyContinue | Out-Null
+        throw "Unable to read Nutanix cluster name."
+    }
+
+    $prefixLength = [Math]::Min(3, $clusterName.Length)
+    $containerPrefix = $clusterName.Substring(0, $prefixLength)
+
+    Write-Host "Cluster name: $clusterName"
+    Write-Host "Container prefix: $containerPrefix"
+
+    $candidateContainers = @()
+    $containers = @(Get-NTNXContainer -ErrorAction Stop)
+
+    foreach ($container in $containers) {
+        $containerName = $container.name
+
+        if ([string]::IsNullOrWhiteSpace($containerName)) {
+            $containerName = $container.containerName
         }
 
-        $prefixLength = [Math]::Min(3, $clusterName.Length)
-        $containerPrefix = $clusterName.Substring(0, $prefixLength)
+        if (-not [string]::IsNullOrWhiteSpace($containerName)) {
+            if ($containerName -like "$containerPrefix*") {
+                if ($containerName -notmatch "NutanixManagementShare|NutaniXFitInstance|default-container") {
+                    $capacityBytes = 0
+                    $usedBytes = 0
+                    $usageStats = $container.usageStats
 
-        Write-Host "Cluster name: $clusterName"
-        Write-Host "Container prefix: $containerPrefix"
-
-        $candidateContainers = @()
-        $containers = @(Get-NTNXContainer -ErrorAction Stop)
-
-        foreach ($container in $containers) {
-            $containerName = if ($container.name) { $container.name } else { $container.containerName }
-
-            if ([string]::IsNullOrWhiteSpace($containerName)) {
-                continue
-            }
-
-            if ($containerName -notlike "$containerPrefix*") {
-                continue
-            }
+                    if ($null -eq $usageStats) {
+                        $usageStats = $container.usage_stats
