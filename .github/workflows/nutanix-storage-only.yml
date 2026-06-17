@@ -7,12 +7,10 @@ on:
         description: "Prism Element / CVM IP"
         required: true
         type: string
-
       vmname:
         description: "VM Name"
         required: true
         type: string
-
       disk_action:
         description: "Disk Action"
         required: true
@@ -21,14 +19,12 @@ on:
         options:
           - add
           - extend
-
       SizeGB:
         description: "Disk Size in GB"
         required: true
         type: string
-
       DiskAddr:
-        description: "Disk Address (required for extend)"
+        description: "Disk Address"
         required: true
         default: none
         type: choice
@@ -38,71 +34,44 @@ on:
           - scsi.1
           - scsi.2
           - scsi.3
+          - scsi.4
+      GuestIP:
+        description: "Windows Guest IP"
+        required: true
+        type: string
+      DriveLetter:
+        description: "Drive Letter"
+        required: true
+        type: string
 
 jobs:
   provision-disk:
     runs-on: self-hosted
 
     steps:
-
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Display Inputs
-        shell: powershell
-        run: |
-          Write-Host "PE IP        : ${{ inputs.pe_ip }}"
-          Write-Host "VM Name      : ${{ inputs.vmname }}"
-          Write-Host "Disk Action  : ${{ inputs.disk_action }}"
-          Write-Host "Size (GB)    : ${{ inputs.SizeGB }}"
-          Write-Host "Disk Address : ${{ inputs.DiskAddr }}"
+      - uses: actions/checkout@v4
 
       - name: Install Posh-SSH
         shell: powershell
         run: |
-          $ErrorActionPreference = "Stop"
-
           Set-PSRepository PSGallery -InstallationPolicy Trusted
-
           if (-not (Get-Module -ListAvailable -Name Posh-SSH)) {
-              Install-Module Posh-SSH -Scope CurrentUser -Force -AllowClobber
+            Install-Module Posh-SSH -Scope CurrentUser -Force -AllowClobber
           }
-
-      - name: Verify Script Exists
-        shell: powershell
-        run: |
-          $ScriptPath = "$env:GITHUB_WORKSPACE\Scripts\diskprovisioning.ps1"
-
-          if (!(Test-Path $ScriptPath)) {
-              throw "Script not found: $ScriptPath"
-          }
-
-          Write-Host "Script Found"
-          Get-Item $ScriptPath
 
       - name: Execute Disk Provisioning
         shell: powershell
         env:
           PE_USERNAME: ${{ secrets.PE_USERNAME }}
           PE_PASSWORD: ${{ secrets.PE_PASSWORD }}
+          LOCAL_USERNAME: ${{ secrets.LOCAL_USERNAME }}
+          LOCAL_PASSWORD: ${{ secrets.LOCAL_PASSWORD }}
         run: |
-          $ErrorActionPreference = "Stop"
-
           & "$env:GITHUB_WORKSPACE\Scripts\diskprovisioning.ps1" `
             -pe_ip "${{ inputs.pe_ip }}" `
             -vmname "${{ inputs.vmname }}" `
             -disk_action "${{ inputs.disk_action }}" `
             -SizeGB "${{ inputs.SizeGB }}" `
-            -DiskAddr "${{ inputs.DiskAddr }}"
-
-      - name: Workflow Completed
-        if: success()
-        shell: powershell
-        run: |
-          Write-Host "Disk operation completed successfully."
-
-      - name: Workflow Failed
-        if: failure()
-        shell: powershell
-        run: |
-          Write-Host "Disk operation failed."
+            -DiskAddr "${{ inputs.DiskAddr }}" `
+            -GuestIP "${{ inputs.GuestIP }}" `
+            -DriveLetter "${{ inputs.DriveLetter }}"
