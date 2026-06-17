@@ -6,6 +6,10 @@ param(
     [string]$vmname,
 
     [Parameter(Mandatory = $true)]
+    [ValidateSet("add", "extend")]
+    [string]$disk_action,
+
+    [Parameter(Mandatory = $true)]
     [ValidatePattern('^\d+$')]
     [string]$SizeGB,
 
@@ -27,6 +31,14 @@ if ([string]::IsNullOrWhiteSpace($env:PE_PASSWORD)) {
 
 if ([int]$SizeGB -le 0) {
     throw "SizeGB must be greater than 0."
+}
+
+if ($disk_action -eq "extend" -and [string]::IsNullOrWhiteSpace($DiskAddr)) {
+    throw "DiskAddr is required when disk_action is extend."
+}
+
+if ($disk_action -eq "add" -and -not [string]::IsNullOrWhiteSpace($DiskAddr)) {
+    Write-Host "DiskAddr was provided, but disk_action is add. DiskAddr will be ignored."
 }
 
 function ConvertTo-AcliQuotedValue {
@@ -101,13 +113,13 @@ function Invoke-NutanixAcli {
 $quotedVmName = ConvertTo-AcliQuotedValue -Value $vmname
 $sizeValue = ConvertTo-AcliQuotedValue -Value "$($SizeGB)G"
 
-if ([string]::IsNullOrWhiteSpace($DiskAddr)) {
-    Write-Host "DiskAddr is blank. Action selected: ADD disk."
+if ($disk_action -eq "add") {
+    Write-Host "Action selected: ADD disk."
 
     $acliCommand = "acli vm.disk_create $quotedVmName create_size=$sizeValue"
 }
 else {
-    Write-Host "DiskAddr provided. Action selected: EXTEND disk."
+    Write-Host "Action selected: EXTEND disk."
 
     $quotedDiskAddr = ConvertTo-AcliQuotedValue -Value $DiskAddr
     $acliCommand = "acli vm.disk_update $quotedVmName disk_addr=$quotedDiskAddr new_size=$sizeValue"
