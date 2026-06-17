@@ -22,25 +22,8 @@ $ErrorActionPreference = "Stop"
 
 Import-Module Posh-SSH -ErrorAction Stop
 
-if ($PSVersionTable.PSEdition -eq "Desktop") {
-    Add-Type @"
-using System.Net;
-using System.Security.Cryptography.X509Certificates;
-
-public class TrustAllCertsPolicy : ICertificatePolicy {
-    public bool CheckValidationResult(
-        ServicePoint srvPoint,
-        X509Certificate certificate,
-        WebRequest request,
-        int certificateProblem) {
-        return true;
-    }
-}
-"@
-
-    [System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
-    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
-}
+[System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
 
 if ([string]::IsNullOrWhiteSpace($env:PE_USERNAME)) {
     throw "Missing GitHub secret: PE_USERNAME"
@@ -98,3 +81,20 @@ function Invoke-NutanixRest {
         Authorization = "Basic $encodedCredential"
         Accept        = "application/json"
     }
+
+    $uri = "https://$Server`:9440/PrismGateway/services/rest/v2.0/$Path"
+
+    return Invoke-RestMethod -Method Get -Uri $uri -Headers $headers -ErrorAction Stop
+}
+
+function Get-NutanixUsageStat {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Container,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Key
+    )
+
+    if ($Container.usageStats -and $null -ne $Container.usageStats.$Key) {
+        return [double]$Container.usageStats.$Key
