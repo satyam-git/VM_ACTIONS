@@ -15,12 +15,12 @@ param(
 
     [Parameter(Mandatory = $false)]
     [ValidateSet("none", "scsi.0", "scsi.1", "scsi.2", "scsi.3")]
-    [string]$DiskAddr = ""
+    [string]$DiskAddr = "none"
 )
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "diskprovisioning.ps1 version: 2026-06-17-cmdlets-container-selection-v2"
+Write-Host "diskprovisioning.ps1 version: 2026-06-17-cmdlets-simple-v3"
 
 Import-Module Posh-SSH -ErrorAction Stop
 
@@ -40,61 +40,60 @@ if ($disk_action -eq "extend" -and ($DiskAddr -eq "none" -or [string]::IsNullOrW
     throw "DiskAddr is required when disk_action is extend."
 }
 
-if ($disk_action -eq "add" -and $DiskAddr -ne "none" -and -not [string]::IsNullOrWhiteSpace($DiskAddr)) {
-    Write-Host "DiskAddr was provided, but disk_action is add. DiskAddr will be ignored."
+if ($vmname.Contains("'")) {
+    throw "VM name cannot contain a single quote."
 }
 
-function ConvertTo-AcliQuotedValue {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Value
-    )
-
-    if ($Value.Contains("'")) {
-        throw "Single quote is not supported in ACLI argument value: $Value"
-    }
-
-    return "'$Value'"
+if ($DiskAddr.Contains("'")) {
+    throw "DiskAddr cannot contain a single quote."
 }
 
-function Get-NutanixUsageStat {
-    param(
-        [Parameter(Mandatory = $true)]
-        [object]$Container,
+$quotedVmName = "'$vmname'"
+$quotedSize = "'$($SizeGB)G'"
+$acliCommand = $null
 
-        [Parameter(Mandatory = $true)]
-        [string]$Key
-    )
+if ($disk_action -eq "add") {
+    Write-Host "Action selected: ADD disk."
 
-    if ($Container.usageStats) {
-        $usageStats = $Container.usageStats
-    }
-    elseif ($Container.usage_stats) {
-        $usageStats = $Container.usage_stats
-    }
-    else {
-        return 0
+    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
+        Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop | Out-Null
     }
 
-    if ($usageStats -is [hashtable] -and $usageStats.ContainsKey($Key)) {
-        return [double]$usageStats[$Key]
-    }
+    $securePePassword = ConvertTo-SecureString $env:PE_PASSWORD -AsPlainText -Force
 
-    $property = $usageStats.PSObject.Properties[$Key]
-    if ($null -ne $property -and $null -ne $property.Value) {
-        return [double]$property.Value
-    }
+    try {
+        Write-Host "Connecting to Nutanix PE with Nutanix cmdlets: $pe_ip"
 
-    return 0
-}
+        Connect-NTNXCluster `
+            -Server $pe_ip `
+            -UserName $env:PE_USERNAME `
+            -Password $securePePassword `
+            -AcceptInvalidSSLCerts `
+            -ErrorAction Stop | Out-Null
 
-function Connect-NutanixClusterForCmdlets {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Server,
+        $cluster = Get-NTNXCluster -ErrorAction Stop
+        $clusterName = $cluster.name
 
-        [Parameter(Mandatory = $true)]
-        [string]$Username,
+        if ([string]::IsNullOrWhiteSpace($clusterName)) {
+            throw "Unable to read Nutanix cluster name."
+        }
 
-        [Parameter(Mandatory = $true)]
-        [string]$Password
+        $prefixLength = [Math]::Min(3, $clusterName.Length)
+        $containerPrefix = $clusterName.Substring(0, $prefixLength)
+
+        Write-Host "Cluster name: $clusterName"
+        Write-Host "Container prefix: $containerPrefix"
+
+        $candidateContainers = @()
+        $containers = @(Get-NTNXContainer -ErrorAction Stop)
+
+        foreach ($container in $containers) {
+            $containerName = if ($container.name) { $container.name } else { $container.containerName }
+
+            if ([string]::IsNullOrWhiteSpace($containerName)) {
+                continue
+            }
+
+            if ($containerName -notlike "$containerPrefix*") {
+                continue
+            }
