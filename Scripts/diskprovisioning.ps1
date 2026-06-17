@@ -6,95 +6,142 @@ param(
     [string]$vmname,
 
     [Parameter(Mandatory = $true)]
-    [ValidateSet("add", "extend")]
+    [ValidateSet("add","extend")]
     [string]$disk_action,
 
     [Parameter(Mandatory = $true)]
-    [ValidatePattern('^\d+$')]
     [string]$SizeGB,
 
     [Parameter(Mandatory = $false)]
-    [ValidateSet("none", "scsi.0", "scsi.1", "scsi.2", "scsi.3")]
+    [ValidateSet("none","scsi.0","scsi.1","scsi.2","scsi.3")]
     [string]$DiskAddr = "none"
 )
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "diskprovisioning.ps1 version: 2026-06-17-cmdlets-pipeline-v5"
+Write-Host "====================================="
+Write-Host "Nutanix Disk Provisioning Started"
+Write-Host "====================================="
 
 Import-Module Posh-SSH -ErrorAction Stop
 
 if ([string]::IsNullOrWhiteSpace($env:PE_USERNAME)) {
-    throw "Missing GitHub secret: PE_USERNAME"
+    throw "PE_USERNAME secret not found"
 }
 
 if ([string]::IsNullOrWhiteSpace($env:PE_PASSWORD)) {
-    throw "Missing GitHub secret: PE_PASSWORD"
+    throw "PE_PASSWORD secret not found"
 }
 
-if ([int]$SizeGB -le 0) {
-    throw "SizeGB must be greater than 0."
+if ($disk_action -eq "extend" -and $DiskAddr -eq "none") {
+    throw "DiskAddr is mandatory when disk_action=extend"
 }
 
-if ($disk_action -eq "extend" -and ($DiskAddr -eq "none" -or [string]::IsNullOrWhiteSpace($DiskAddr))) {
-    throw "DiskAddr is required when disk_action is extend."
+$SecurePassword = ConvertTo-SecureString $env:PE_PASSWORD -AsPlainText -Force
+$Credential = New-Object PSCredential ($env:PE_USERNAME,$SecurePassword)
+
+Write-Host "Connecting to cluster $pe_ip"
+
+$Session = New-SSHSession `
+    -ComputerName $pe_ip `
+    -Credential $Credential `
+    -AcceptKey `
+    -Force
+
+if ($Session.SessionId -lt 0) {
+    throw "SSH connection failed"
 }
 
-if ($vmname.Contains("'")) {
-    throw "VM name cannot contain a single quote."
-}
+try {
 
-if ($DiskAddr.Contains("'")) {
-    throw "DiskAddr cannot contain a single quote."
-}
+    if ($disk_action -eq "add") {
 
-$quotedVmName = "'$vmname'"
-$quotedSize = "'$($SizeGB)G'"
-$acliCommand = $null
+        Write-Host "Finding best container..."
 
-if ($disk_action -eq "add") {
-    Write-Host "Action selected: ADD disk."
+        if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
+            Add-PSSnapin NutanixCmdletsPSSnapin
+        }
 
-    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
-        Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop | Out-Null
-    }
+        Connect-NTNXCluster `
+            -Server $pe_ip `
+            -UserName $env:PE_USERNAME `
+            -Password $SecurePassword `
+            -AcceptInvalidSSLCerts | Out-Null
 
-    $securePePassword = ConvertTo-SecureString $env:PE_PASSWORD -AsPlainText -Force
+        $ClusterDetails = Get-NTNXCluster
 
-    Write-Host "Connecting to Nutanix PE with Nutanix cmdlets: $pe_ip"
-    Connect-NTNXCluster -Server $pe_ip -UserName $env:PE_USERNAME -Password $securePePassword -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
+        $Prefix = $ClusterDetails.name.Substring(
+            0,
+            [math]::Min(3,$ClusterDetails.name.Length)
+        )
 
-    $clusterDetails = Get-NTNXCluster -ErrorAction Stop
-    $clusterName = $clusterDetails.name
+        $BestContainer = Get-NTNXContainer |
+            Where-Object {
+                $n = if ($_.name) { $_.name } else { $_.containerName }
 
-    if ([string]::IsNullOrWhiteSpace($clusterName)) {
-        Disconnect-NTNXCluster -Servers $pe_ip -ErrorAction SilentlyContinue | Out-Null
-        throw "Unable to read Nutanix cluster name."
-    }
-
-    $prefix = $clusterName.Substring(0, [math]::Min(3, $clusterName.Length))
-
-    Write-Host "Cluster name: $clusterName"
-    Write-Host "Container prefix: $prefix"
-
-    $best = Get-NTNXContainer -ErrorAction Stop |
-        Where-Object {
-            $n = if ($_.name) { $_.name } else { $_.containerName }
-            $n -like "$prefix*" -and $n -notmatch "NutanixManagementShare|NutaniXFitInstance|default-container"
-        } |
-        Select-Object *,
+                $n -like "$Prefix*" -and
+                $n -notmatch "NutanixManagementShare|NutaniXFitInstance|default-container"
+            } |
+            Select-Object *,
             @{
                 Name = "FreePct"
                 Expression = {
-                    $cap = [double]$_.usageStats.'storage.capacity_bytes'
-                    $use = [double]$_.usageStats.'storage.usage_bytes'
 
-                    if ($cap -gt 0) {
-                        (($cap - $use) / $cap) * 100
+                    $Cap = [double]$_.usageStats.'storage.capacity_bytes'
+                    $Use = [double]$_.usageStats.'storage.usage_bytes'
+
+                    if ($Cap -gt 0) {
+                        (($Cap - $Use) / $Cap) * 100
                     }
                     else {
                         0
                     }
                 }
             } |
-        Sort-Object FreePct -Descending |
+            Sort-Object FreePct -Descending |
+            Select-Object -First 1
+
+        $ContainerName = if ($BestContainer.name) {
+            $BestContainer.name
+        }
+        else {
+            $BestContainer.containerName
+        }
+
+        Write-Host "Selected Container: $ContainerName"
+
+        $AcliCommand = "acli vm.disk_create '$vmname' container='$ContainerName' create_size='${SizeGB}G'"
+    }
+
+    else {
+
+        Write-Host "Extending existing disk..."
+
+        $AcliCommand = "acli vm.disk_update '$vmname' disk_addr='$DiskAddr' new_size='${SizeGB}G'"
+    }
+
+    Write-Host "Executing:"
+    Write-Host $AcliCommand
+
+    $Result = Invoke-SSHCommand `
+        -SessionId $Session.SessionId `
+        -Command $AcliCommand
+
+    Write-Host ""
+    Write-Host "===== ACLI OUTPUT ====="
+    Write-Host $Result.Output
+    Write-Host "======================="
+
+}
+finally {
+
+    if (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue) {
+        Disconnect-NTNXCluster -Servers $pe_ip -ErrorAction SilentlyContinue | Out-Null
+    }
+
+    if ($Session) {
+        Remove-SSHSession -SessionId $Session.SessionId | Out-Null
+    }
+}
+
+Write-Host "Disk operation completed successfully."
