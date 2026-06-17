@@ -1,48 +1,69 @@
-param($JsonInputs)
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$Operation, # "Compute" or "Storage"
 
-$data = $JsonInputs | ConvertFrom-Json
+    # JSON input for Compute, or individual parameters for Storage
+    [string]$JsonInputs,
+    [string]$pe_ip,
+    [string]$vmname,
+    [string]$disk_action,
+    [string]$SizeGB,
+    [string]$DiskAddr = "none",
+    [string]$GuestIP,
+    [string]$DriveLetter
+)
 
-if ($data.operation -eq "compute") {
+$ErrorActionPreference = "Stop"
 
-    Write-Host "Starting Compute Resize..."
-
-    $ClusterIP = $data.pE_IP
-    $VMName = $data.vmname
-    $CPUs = [int]$data.CPU_size
-    $MemoryMB = [int]$data.mem_size * 1024
-    $Delay = [int]$data.delay_mins
-
+# --- HELPER: Load Nutanix Modules ---
+function Load-NutanixSnapin {
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
         Add-PSSnapin NutanixCmdletsPSSnapin | Out-Null
     }
+}
 
-    $Pass = $env:PE_PASSWORD | ConvertTo-SecureString -AsPlainText -Force
-    Connect-NTNXCluster -Server $ClusterIP -UserName $env:PE_USERNAME -Password $Pass -AcceptInvalidSSLCerts | Out-Null
+# --- OPERATION: COMPUTE ---
+if ($Operation -eq "Compute") {
+    $data = $JsonInputs | ConvertFrom-Json
+    Load-NutanixSnapin
+    
+    $Pass = $env:PE_PASS | ConvertTo-SecureString -AsPlainText -Force
+    Connect-NTNXCluster -Server $data.pE_IP -UserName $env:PE_USER -Password $Pass -AcceptInvalidSSLCerts | Out-Null
+    
+    $VM = Get-NTNXVM | Where-Object { $_.vmName -eq $data.vmname }
+    if (-not $VM) { throw "VM $($data.vmname) not found." }
 
-    $VM = Get-NTNXVM | Where-Object { $_.vmName -eq $VMName }
-    if (-not $VM) { throw "VM not found" }
-
-    if ($Delay -gt 0) { Start-Sleep -Seconds ($Delay * 60) }
+    if ($data.delay_mins -gt 0) { Start-Sleep -Seconds ($data.delay_mins * 60) }
 
     Set-NTNXVMPowerState -Vmid $VM.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
     Start-Sleep -Seconds 60
-
-    Set-NTNXVirtualMachine -Vmid $VM.uuid -NumVcpus $CPUs -MemoryMb $MemoryMB | Out-Null
-
-    Set-NTNXVMPowerState -Vmid $VM.uuid -Transition ON | Out-Null
-
-    Disconnect-NTNXCluster -Servers $ClusterIP | Out-Null
-
-    Write-Host "Compute resize completed."
+    Set-NTNXVirtualMachine -Vmid $VM.uuid -NumVcpus [int]$data.CPU_size -MemoryMb ([int]$data.mem_size * 1024) -ErrorAction Stop | Out-Null
+    Set-NTNXVMPowerState -Vmid $VM.uuid -Transition ON -ErrorAction Stop | Out-Null
+    
+    Disconnect-NTNXCluster -Servers $data.pE_IP | Out-Null
 }
-else {
 
-    & "$PSScriptRoot\Storage provisioning with OS.ps1" `
-        -pe_ip $data.pe_ip `
-        -vmname $data.vmname `
-        -disk_action $data.disk_action `
-        -SizeGB $data.SizeGB `
-        -DiskAddr $data.DiskAddr `
-        -GuestIP $data.GuestIP `
-        -DriveLetter $data.DriveLetter
+# --- OPERATION: STORAGE ---
+elseif ($Operation -eq "Storage") {
+    Import-Module Posh-SSH -ErrorAction Stop
+    $SecurePassword = ConvertTo-SecureString $env:PE_PASSWORD -AsPlainText -Force
+    $Credential = New-Object PSCredential ($env:PE_USERNAME, $SecurePassword)
+    $Session = New-SSHSession -ComputerName $pe_ip -Credential $Credential -AcceptKey -Force
+
+    try {
+        if ($disk_action -eq "add") {
+            Load-NutanixSnapin
+            Connect-NTNXCluster -Server $pe_ip -UserName $env:PE_USERNAME -Password $SecurePassword -AcceptInvalidSSLCerts | Out-Null
+            # ... (Insert your existing logic to find $BestContainer and $AcliCommand) ...
+            $AcliCommand = "acli vm.disk_create '$vmname' container='$ContainerName' create_size='${SizeGB}G'"
+        } else {
+            $AcliCommand = "acli vm.disk_update '$vmname' disk_addr='$DiskAddr' new_size='${SizeGB}G'"
+        }
+
+        $Result = Invoke-SSHCommand -SessionId $Session.SessionId -Command $AcliCommand
+        # ... (Insert your existing Guest OS Invoke-Command logic) ...
+    }
+    finally {
+        if ($Session) { Remove-SSHSession -SessionId $Session.SessionId }
+    }
 }
