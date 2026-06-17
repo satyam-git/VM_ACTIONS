@@ -20,6 +20,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+Write-Host "diskprovisioning.ps1 version: 2026-06-17-cmdlets-container-selection-v2"
+
 Import-Module Posh-SSH -ErrorAction Stop
 
 if ([string]::IsNullOrWhiteSpace($env:PE_USERNAME)) {
@@ -96,4 +98,3 @@ function Connect-NutanixClusterForCmdlets {
 
         [Parameter(Mandatory = $true)]
         [string]$Password
-    )
