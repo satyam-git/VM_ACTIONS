@@ -1,95 +1,57 @@
-name: Nutanix VM Operations
+name: Nutanix VM Management
 
 on:
   workflow_dispatch:
     inputs:
       operation:
-        description: "Operation"
+        description: "Choose Operation"
         required: true
         type: choice
         options:
-          - compute
-          - storage
-
-      vmname:
-        description: "VM Name"
-        required: true
-        type: string
-
-      pE_IP:
-        description: "Cluster IP (Compute)"
-        required: false
-        type: string
-
-      CPU_size:
-        description: "CPU Cores"
-        required: false
-        type: string
-
-      mem_size:
-        description: "Memory GB"
-        required: false
-        type: string
-
-      delay_mins:
-        description: "Delay Minutes"
-        required: false
-        default: "0"
-        type: string
-
-      pe_ip:
-        description: "PE/CVM IP (Storage)"
-        required: false
-        type: string
-
-      disk_action:
-        description: "Disk Action"
-        required: false
-        type: choice
-        options:
-          - add
-          - extend
-
-      SizeGB:
-        description: "Disk Size GB"
-        required: false
-        type: string
-
-      DiskAddr:
-        description: "Disk Address"
-        required: false
-        type: choice
-        options:
-          - none
-          - scsi.0
-          - scsi.1
-          - scsi.2
-          - scsi.3
-          - scsi.4
-
-      GuestIP:
-        description: "Guest FQDN"
-        required: false
-        type: string
-
-      DriveLetter:
-        description: "Drive Letter"
-        required: false
-        type: string
+          - Compute (CPU/Memory)
+          - Storage (Disk/OS)
+      pe_ip: { description: "Prism Element IP", required: true }
+      vmname: { description: "VM Name", required: true }
+      # Compute Inputs
+      cpu_size: { description: "CPU Cores (for Compute)", required: false, default: '0' }
+      mem_size: { description: "Memory GB (for Compute)", required: false, default: '0' }
+      # Storage Inputs
+      disk_action: { description: "Disk Action (for Storage)", required: false, default: 'none' }
+      size_gb: { description: "Disk Size GB (for Storage)", required: false, default: '0' }
+      disk_addr: { description: "Disk Address (for Storage)", required: false, default: 'none' }
+      guest_ip: { description: "Guest IP (for Storage)", required: false, default: '' }
+      drive_letter: { description: "Drive Letter (for Storage)", required: false, default: '' }
 
 jobs:
-  run-operation:
+  manage-vm:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-
-      - name: Run Operation
+      
+      - name: Run Management Script
         shell: powershell
         env:
-          PE_USERNAME: ${{ secrets.PE_USERNAME }}
-          PE_PASSWORD: ${{ secrets.PE_PASSWORD }}
-          LOCAL_USERNAME: ${{ secrets.LOCAL_USERNAME }}
-          LOCAL_PASSWORD: ${{ secrets.LOCAL_PASSWORD }}
-          INPUTS_JSON: ${{ toJson(github.event.inputs) }}
+          PE_USER: ${{ secrets.PE_Username }}
+          PE_PASS: ${{ secrets.PE_Password }}
+          LOCAL_USER: ${{ secrets.LOCAL_USERNAME }}
+          LOCAL_PASS: ${{ secrets.LOCAL_PASSWORD }}
         run: |
-          & "$env:GITHUB_WORKSPACE\Scripts\nutanix-vm-operations.ps1" -JsonInputs $env:INPUTS_JSON
+          $inputs = @{
+            operation = "${{ inputs.operation }}"
+            pe_ip = "${{ inputs.pe_ip }}"
+            vmname = "${{ inputs.vmname }}"
+            cpu = "${{ inputs.cpu_size }}"
+            ram = "${{ inputs.mem_size }}"
+            d_action = "${{ inputs.disk_action }}"
+            d_size = "${{ inputs.size_gb }}"
+            d_addr = "${{ inputs.disk_addr }}"
+            g_ip = "${{ inputs.guest_ip }}"
+            g_drive = "${{ inputs.drive_letter }}"
+          }
+          $json = $inputs | ConvertTo-Json
+          
+          if ($inputs.operation -eq "Compute (CPU/Memory)") {
+            & "$env:GITHUB_WORKSPACE\Scripts\vm-resize.ps1" -JsonInputs $json
+          } else {
+            & "$env:GITHUB_WORKSPACE\Scripts\diskprovisioning.ps1" -pe_ip $inputs.pe_ip -vmname $inputs.vmname -disk_action $inputs.d_action -SizeGB $inputs.d_size -DiskAddr $inputs.d_addr -GuestIP $inputs.g_ip -DriveLetter $inputs.g_drive
+          }
