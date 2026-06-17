@@ -1,68 +1,12 @@
-name: Nutanix Disk Provisioning
-
-on:
-  workflow_dispatch:
-    inputs:
-      pe_ip:
-        description: "Nutanix Prism Element / CVM IP"
-        required: true
-        type: string
-      vmname:
-        description: "Nutanix VM name"
-        required: true
-        type: string
-      disk_action:
-        description: "Disk action"
-        required: true
-        default: "add"
-        type: choice
-        options:
-          - add
-          - extend
-      SizeGB:
-        description: "Disk size in GB. For add: new disk size. For extend: final disk size."
-        required: true
-        type: string
-      DiskAddr:
-        description: "Existing disk address. Select none when disk_action is add."
-        required: true
-        default: "none"
-        type: choice
-        options:
-          - none
-          - scsi.0
-          - scsi.1
-          - scsi.2
-          - scsi.3
-
-jobs:
-  provision-disk:
-    runs-on: self-hosted
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Posh-SSH
-        shell: powershell
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-
-          if (-not (Get-Module -ListAvailable -Name Posh-SSH)) {
-            Install-Module Posh-SSH -Scope CurrentUser -Force
-          }
-
-      - name: Add or extend Nutanix VM disk
-        shell: powershell
-        env:
-          PE_USERNAME: ${{ secrets.PE_USERNAME }}
-          PE_PASSWORD: ${{ secrets.PE_PASSWORD }}
-        run: |
-          & "$env:GITHUB_WORKSPACE\Scripts\diskprovisioning.ps1" `
-            -pe_ip "${{ inputs.pe_ip }}" `
-            -vmname "${{ inputs.vmname }}" `
-            -disk_action "${{ inputs.disk_action }}" `
-            -SizeGB "${{ inputs.SizeGB }}" `
-            -DiskAddr "${{ inputs.DiskAddr }}"
+- name: Add or Extend Disk
+  shell: powershell
+  env:
+    PE_USERNAME: ${{ secrets.PE_USERNAME }}
+    PE_PASSWORD: ${{ secrets.PE_PASSWORD }}
+  run: |
+    & "$env:GITHUB_WORKSPACE\Scripts\diskprovisioning.ps1" `
+      -pe_ip "${{ inputs.pe_ip }}" `
+      -vmname "${{ inputs.vmname }}" `
+      -disk_action "${{ inputs.disk_action }}" `
+      -SizeGB "${{ inputs.SizeGB }}" `
+      -DiskAddr "${{ inputs.DiskAddr }}"
