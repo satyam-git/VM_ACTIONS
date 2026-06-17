@@ -2,13 +2,16 @@
 $ErrorActionPreference = 'Stop'
 
 function Ensure-NutanixModules {
-    # Using modern Import-Module. If you must use Add-PSSnapin, uncomment that line.
+    # Check for the modern module first
     if (-not (Get-Module -Name Nutanix.Cmdlets -ListAvailable)) {
-        # Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue
-        Write-Error "Nutanix PowerShell module not found. Please install it on the runner."
-        exit 1
+        # Fallback to snapin if module is not found
+        if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
+            Write-Error "Nutanix PowerShell module/snapin not found. Please install on the runner."
+            exit 1
+        }
+    } else {
+        Import-Module Nutanix.Cmdlets
     }
-    Import-Module Nutanix.Cmdlets
 }
 
 function Add-NutanixDisk {
