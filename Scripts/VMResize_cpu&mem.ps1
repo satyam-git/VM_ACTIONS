@@ -19,16 +19,20 @@ Connect-NTNXCluster -Server $ClusterIP -UserName $env:PE_USER -Password $Pass -A
 
 # 3. Find VM and get current values
 $VM = Get-NTNXVM | Where-Object { $_.vmName -eq $VMName }
-if (-not $VM) { throw "VM $VMName not found." }
+if (-not $VM) { 
+    Disconnect-NTNXCluster -Servers $ClusterIP
+    throw "VM $VMName not found." 
+}
 
 $CurrentCPU = [int]$VM.numVcpus
 $CurrentMemGB = [int]($VM.memoryMb / 1024)
 
-# 4. Determine final values (Treat 0 as "no change")
+# 4. Determine final values (Treat 0 or empty as "no change")
 $FinalCPU = if ($RequestedCPU -gt 0) { $RequestedCPU } else { $CurrentCPU }
-$FinalMemGB = if ($RequestedMemGB -gt 0) { $RequestedMemGB } else { $CurrentMemGB }
+$TempMem = if ($RequestedMemGB -gt 0) { $RequestedMemGB } else { $CurrentMemGB }
+$FinalMemGB = if ($TempMem -lt 1) { 1 } else { $TempMem }
 
-# 5. Skip Logic (Example 2 & 3: Skip if current == requested)
+# 5. Skip Logic (If current matches requested, exit immediately)
 if ($FinalCPU -eq $CurrentCPU -and $FinalMemGB -eq $CurrentMemGB) {
     Write-Host "Current and requested values are identical. Skipping resize."
     Disconnect-NTNXCluster -Servers $ClusterIP
@@ -48,8 +52,9 @@ function Invoke-TwoStrikeShutdown {
     Set-NTNXVMPowerState -Vmid $VMObj.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
     Start-Sleep -Seconds 40
     
-    $CurrentVM = Get-NTNXVM -Vmid $VMObj.uuid
-    if ($CurrentVM.powerState -eq "ON") {
+    # Check if VM is actually down
+    $CheckVM = Get-NTNXVM -Vmid $VMObj.uuid
+    if ($CheckVM.powerState -eq "ON") {
         Write-Host "VM still ON. Attempt 2: Initiating ACPI Shutdown again..."
         Set-NTNXVMPowerState -Vmid $VMObj.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
         Start-Sleep -Seconds 20
