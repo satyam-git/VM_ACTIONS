@@ -11,7 +11,7 @@ $CPUs = [int]$data.CPU_size
 $MemoryMB = [int]$data.mem_size * 1024
 $Delay = [int]$data.delay_mins
 
-# 1. Load Nutanix Module (Using full path if necessary)
+# 1. Load Nutanix Module
 if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
     Write-Host "Loading Nutanix Snapin..."
     Add-PSSnapin NutanixCmdletsPSSnapin | Out-Null
@@ -31,23 +31,40 @@ if (-not $VM) {
     exit 1
 }
 
-# 4. Handle Delay
+# 4. Handle Delay (New Feature)
 if ($Delay -gt 0) {
-    Write-Host "Waiting $Delay minutes..."
+    Write-Host "Delay set to $Delay minutes. Sleeping..."
     Start-Sleep -Seconds ($Delay * 60)
 }
 
-# 5. Shutdown and Resize
-Write-Host "Shutting down VM $VMName (ACPI)..."
-Set-NTNXVMPowerState -Vmid $VM.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
-Start-Sleep -Seconds 60
+# 5. Shutdown Logic (Two-Strike Rule)
+function Invoke-TwoStrikeShutdown {
+    param($VMObj)
+    Write-Host "Attempt 1: Initiating ACPI Shutdown..."
+    Set-NTNXVMPowerState -Vmid $VMObj.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
+    
+    Start-Sleep -Seconds 40
+    
+    # Refresh VM object to check power state
+    $CurrentVM = Get-NTNXVM -Vmid $VMObj.uuid
+    if ($CurrentVM.powerState -eq "ON") {
+        Write-Host "VM still ON. Attempt 2: Initiating ACPI Shutdown again..."
+        Set-NTNXVMPowerState -Vmid $VMObj.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
+        Start-Sleep -Seconds 20 # Wait a moment for final shutdown
+    } else {
+        Write-Host "VM confirmed down."
+    }
+}
 
+Invoke-TwoStrikeShutdown -VMObj $VM
+
+# 6. Resize
 Write-Host "Applying settings: $CPUs CPU, $($data.mem_size)GB RAM..."
 Set-NTNXVirtualMachine -Vmid $VM.uuid -NumVcpus $CPUs -MemoryMb $MemoryMB -ErrorAction Stop | Out-Null
 
 Write-Host "Powering on VM..."
 Set-NTNXVMPowerState -Vmid $VM.uuid -Transition ON -ErrorAction Stop | Out-Null
 
-# 6. Success
+# 7. Success
 Disconnect-NTNXCluster -Servers $ClusterIP | Out-Null
 Write-Host "SUCCESS: Compute resize completed."
