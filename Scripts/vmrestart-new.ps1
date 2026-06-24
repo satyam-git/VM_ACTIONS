@@ -4,35 +4,41 @@ $logPath = Join-Path $env:GITHUB_WORKSPACE "data\vm_execution_log.csv"
 
 $siteMap = @{ "Banglore" = "192.168.136.50"; "Chennai" = "10.0.0.10" }
 
+# Ensure log directory exists
 if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
 if (Test-Path $logPath) { Remove-Item $logPath }
 
 $taskBlock = {
-    param($site, $vmNames, $action, $delays, $user, $pass, $logPath, $siteMap)
-    $ip = $siteMap[$site]
-    if (-not $ip) { return }
-
-    # Load module inside the job scope
-    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin }
+    param($site, $vmNames, $action, $delays, $user, $logPath, $siteMap)
     
-    $creds = $pass | ConvertTo-SecureString -AsPlainText -Force
+    # 1. Load Modules
+    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { 
+        Add-PSSnapin NutanixCmdletsPSSnapin 
+    }
     
-    # Split input strings into arrays
+    # 2. Secure Credential Loading (Fixes MegaLinter Error)
+    $encryptedPass = Get-Content "C:\Scripts\nutanix_creds.txt" | ConvertTo-SecureString
+    $creds = New-Object System.Management.Automation.PSCredential($user, $encryptedPass)
+    
+    # 3. Parse inputs
     $vmArray = $vmNames.Split(',').Trim()
     $delayArray = if ($delays) { $delays.Split(',').Trim() } else { @() }
     
-    # Process each VM in the set independently
-    for ($i = 0; $i -lt $vmArray.Count; $i++) {
-        $vmName = $vmArray[$i]
-        $delay = if ($i -lt $delayArray.Count) { [int]$delayArray[$i] } else { 0 }
+    $ip = $siteMap[$site]
+    
+    try {
+        Connect-NTNXCluster -Server $ip -Credential $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
         
-        # 1. Individual Delay
-        if ($delay -gt 0) { Start-Sleep -Seconds ($delay * 60) }
-        
-        $Status = "failed"
-        try {
-            Connect-NTNXCluster -Server $ip -UserName $user -Password $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
+        # Process each VM in the set independently
+        for ($i = 0; $i -lt $vmArray.Count; $i++) {
+            $vmName = $vmArray[$i]
+            $vmDelay = if ($i -lt $delayArray.Count) { [int]$delayArray[$i] } else { 0 }
+            
+            # Individual Delay
+            if ($vmDelay -gt 0) { Start-Sleep -Seconds ($vmDelay * 60) }
+            
             $vm = Get-NTNXVM | Where-Object { $_.vmName -eq $vmName }
+            $Status = "failed"
             
             if ($null -eq $vm) { $Status = "VM Not Found" }
             else {
@@ -61,10 +67,12 @@ $taskBlock = {
                     }
                 }
             }
-        } catch { $Status = "failed - $($_.Exception.Message.Split(':')[0])" }
-        finally { Disconnect-NTNXCluster -Servers $ip -ErrorAction SilentlyContinue }
-        
-        "$site,$vmName,$action,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
+            "$site,$vmName,$action,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
+        }
+    } catch { 
+        "$site,$vmNames,Error,$($_.Exception.Message.Split(':')[0])" | Out-File -FilePath $logPath -Append -Encoding utf8
+    } finally { 
+        Disconnect-NTNXCluster -Servers $ip -ErrorAction SilentlyContinue 
     }
 }
 
@@ -73,7 +81,7 @@ for ($i = 1; $i -le 3; $i++) {
     $v = $data.$("v$i")
     $s = $data.$("s$i")
     if (-not [string]::IsNullOrWhiteSpace($v) -and $s -ne "None") {
-        Start-Job -ScriptBlock $taskBlock -ArgumentList $s, $v, $data.$("a$i"), $data.$("d$i"), $env:NUTANIX_USER, $env:NUTANIX_PASS, $logPath, $siteMap
+        Start-Job -ScriptBlock $taskBlock -ArgumentList $s, $v, $data.$("a$i"), $data.$("d$i"), $env:NUTANIX_USER, $logPath, $siteMap
     }
 }
 
