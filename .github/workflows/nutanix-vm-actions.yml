@@ -26,7 +26,6 @@ jobs:
         shell: powershell
         env:
           NUTANIX_USER: ${{ secrets.NUTANIX_USER }}
-          NUTANIX_PASS: ${{ secrets.NUTANIX_PASS }}
           INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
           & "$env:GITHUB_WORKSPACE\Scripts\vmrestart-new.ps1" -JsonInputs $env:INPUTS_JSON
@@ -35,6 +34,11 @@ jobs:
         shell: powershell
         run: |
           if (Test-Path "data/vm_execution_log.csv") {
-            Write-Host "Site Name,vmname,action,status" -ForegroundColor Cyan
-            Get-Content "data/vm_execution_log.csv"
+            # This appends the CSV content formatted as a Markdown table to the job summary
+            Write-Output "### Execution Summary" >> $env:GITHUB_STEP_SUMMARY
+            Write-Output "| Site Name | VM Name | Action | Status |" >> $env:GITHUB_STEP_SUMMARY
+            Write-Output "| :--- | :--- | :--- | :--- |" >> $env:GITHUB_STEP_SUMMARY
+            Import-Csv "data/vm_execution_log.csv" -Header "Site", "VM", "Action", "Status" | ForEach-Object {
+              Write-Output "| $($_.Site) | $($_.VM) | $($_.Action) | $($_.Status) |" >> $env:GITHUB_STEP_SUMMARY
+            }
           }
