@@ -15,18 +15,24 @@ if (Test-Path $logPath) { Remove-Item $logPath }
 $taskBlock = {
     param($site, $vmNames, $action, $delays, $user, $tempLogPath, $siteMap)
     
+    # Load module
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin }
     
     try {
-        # Securely load password as a plain string for the older -Password parameter
+        # Securely load password and convert to SecureString for the -Password parameter
         $key = Get-Content "C:\Scripts\key.txt" -ErrorAction Stop
         # pragma: ignore:PSAvoidUsingConvertToSecureStringWithKey
         $secPass = Get-Content "C:\Scripts\nutanix_creds.txt" -ErrorAction Stop | ConvertTo-SecureString -Key $key
+        
+        # Convert SecureString to plain string for parameter binding (Required for old modules)
         $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secPass)
         $plainPass = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
         [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
         
-        Connect-NTNXCluster -Server $siteMap[$site] -UserName $user -Password $plainPass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
+        # Convert back to SecureString specifically for the cmdlet parameter
+        $finalPass = $plainPass | ConvertTo-SecureString -AsPlainText -Force
+        
+        Connect-NTNXCluster -Server $siteMap[$site] -UserName $user -Password $finalPass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
         
         $vmArray = $vmNames.Split(',').Trim()
         $delayArray = if ($delays) { $delays.Split(',').Trim() } else { @() }
