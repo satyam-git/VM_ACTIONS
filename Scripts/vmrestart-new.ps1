@@ -27,8 +27,6 @@ $taskBlock = {
         
         for ($i = 0; $i -lt $vmArray.Count; $i++) {
             $vmName = $vmArray[$i]
-            
-            # డెలే లెక్కించడం
             $vmDelay = 0
             if ($isMultiDelay) {
                 if ($i -lt $delayValues.Count) { $vmDelay = [int]$delayValues[$i] }
