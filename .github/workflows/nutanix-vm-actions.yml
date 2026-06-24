@@ -34,11 +34,10 @@ jobs:
         shell: powershell
         run: |
           if (Test-Path "data/vm_execution_log.csv") {
-            # This appends the CSV content formatted as a Markdown table to the job summary
-            Write-Output "### Execution Summary" >> $env:GITHUB_STEP_SUMMARY
-            Write-Output "| Site Name | VM Name | Action | Status |" >> $env:GITHUB_STEP_SUMMARY
-            Write-Output "| :--- | :--- | :--- | :--- |" >> $env:GITHUB_STEP_SUMMARY
+            "### Execution Summary" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            "| Site Name | VM Name | Action | Status |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            "| :--- | :--- | :--- | :--- |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
             Import-Csv "data/vm_execution_log.csv" -Header "Site", "VM", "Action", "Status" | ForEach-Object {
-              Write-Output "| $($_.Site) | $($_.VM) | $($_.Action) | $($_.Status) |" >> $env:GITHUB_STEP_SUMMARY
+              "| $($_.Site) | $($_.VM) | $($_.Action) | $($_.Status) |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
             }
           }
