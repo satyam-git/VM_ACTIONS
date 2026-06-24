@@ -33,23 +33,38 @@ $taskBlock = {
             
             if ($null -eq $vm) { $status = "VM Not Found" }
             else {
-                $transition = switch ($action) { "start" { "ON" }; "stop" { "ACPI_SHUTDOWN" }; "restart" { "ACPI_REBOOT" } }
+                # --- Already State Check Logic ---
+                $isAlreadyOn = ($vm.powerState -eq "on")
                 
-                # Strike 1: Execute action
-                Set-NTNXVMPowerState -Vmid $vm.uuid -Transition $transition
-                
-                # Wait 30 seconds for state transition
-                Start-Sleep -Seconds 30
-                
-                # Strike 2: Verify and Retry
-                $currentVM = Get-NTNXVM -Vmid $vm.uuid
-                $isDown = ($currentVM.powerState -eq "off")
-                $isOn = ($currentVM.powerState -eq "on")
-                $needsRetry = ($action -eq "start" -and -not $isOn) -or (($action -eq "stop" -or $action -eq "restart") -and -not $isDown)
-                
-                if ($needsRetry) {
-                    Set-NTNXVMPowerState -Vmid $vm.uuid -Transition $transition
-                    $status = "triggered (with retry)"
+                switch ($action) {
+                    "start" {
+                        if ($isAlreadyOn) { $status = "already on - hence skipped" }
+                        else { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition "ON" }
+                    }
+                    "stop" {
+                        if (-not $isAlreadyOn) { $status = "already off - hence skipped" }
+                        else { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition "ACPI_SHUTDOWN" }
+                    }
+                    "restart" {
+                        if (-not $isAlreadyOn) { $status = "vm is powered off, please start first" }
+                        else { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition "ACPI_REBOOT" }
+                    }
+                }
+
+                # --- Retry Logic (Strike 2) ---
+                if ($status -eq "successful") {
+                    Start-Sleep -Seconds 30
+                    $currentVM = Get-NTNXVM -Vmid $vm.uuid
+                    $isDown = ($currentVM.powerState -eq "off")
+                    $isOn = ($currentVM.powerState -eq "on")
+                    
+                    $needsRetry = ($action -eq "start" -and -not $isOn) -or (($action -eq "stop" -or $action -eq "restart") -and -not $isDown)
+                    
+                    if ($needsRetry) {
+                        $transition = switch ($action) { "start" { "ON" }; "stop" { "ACPI_SHUTDOWN" }; "restart" { "ACPI_REBOOT" } }
+                        Set-NTNXVMPowerState -Vmid $vm.uuid -Transition $transition
+                        $status = "triggered (with retry)"
+                    }
                 }
             }
             "$site,$vmName,$action,$status" | Out-File -FilePath $tempLogPath -Append -Encoding utf8
@@ -58,13 +73,14 @@ $taskBlock = {
     finally { Disconnect-NTNXCluster -Servers $siteMap[$site] -ErrorAction SilentlyContinue }
 }
 
+# Site Mapping Dictionary
 $siteMap = @{ "Banglore" = "192.168.136.50"; "Chennai" = "10.0.0.10" }
 
 for ($i = 1; $i -le 3; $i++) {
     $v = $data.$("v$i"); $s = $data.$("s$i"); $a = $data.$("a$i"); $d = $data.$("d$i")
     if (-not [string]::IsNullOrWhiteSpace($v) -and $s -ne "None") {
         $jobLog = Join-Path $tempDir "job_$i.csv"
-        # Pass the secret to the environment of the job
+        # Secret Injection for Background Job
         $env:NUTANIX_PASS_JOB = $env:NUTANIX_PASS
         Start-Job -ScriptBlock $taskBlock -ArgumentList $s, $v, $a, $d, $env:NUTANIX_USER, $jobLog, $siteMap
     }
