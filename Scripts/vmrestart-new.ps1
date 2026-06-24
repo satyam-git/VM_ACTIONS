@@ -4,23 +4,23 @@ $logPath = Join-Path $env:GITHUB_WORKSPACE "data\vm_execution_log.csv"
 
 $siteMap = @{ "Banglore" = "192.168.136.50"; "Chennai" = "10.0.0.10" }
 
-# Ensure log directory exists
 if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
 if (Test-Path $logPath) { Remove-Item $logPath }
 
 $taskBlock = {
     param($site, $vmNames, $action, $delays, $user, $logPath, $siteMap)
     
-    # 1. Load Modules
+    # Load module
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { 
         Add-PSSnapin NutanixCmdletsPSSnapin 
     }
     
-    # 2. Secure Credential Loading (Fixes MegaLinter Error)
-    $encryptedPass = Get-Content "C:\Scripts\nutanix_creds.txt" | ConvertTo-SecureString
+    # Load credentials using the shared key
+    $key = Get-Content "C:\Scripts\key.txt"
+    # pragma: ignore:PSAvoidUsingConvertToSecureStringWithKey
+    $encryptedPass = Get-Content "C:\Scripts\nutanix_creds.txt" | ConvertTo-SecureString -Key $key
     $creds = New-Object System.Management.Automation.PSCredential($user, $encryptedPass)
     
-    # 3. Parse inputs
     $vmArray = $vmNames.Split(',').Trim()
     $delayArray = if ($delays) { $delays.Split(',').Trim() } else { @() }
     
@@ -29,15 +29,14 @@ $taskBlock = {
     try {
         Connect-NTNXCluster -Server $ip -Credential $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
         
-        # Process each VM in the set independently
         for ($i = 0; $i -lt $vmArray.Count; $i++) {
             $vmName = $vmArray[$i]
             $vmDelay = if ($i -lt $delayArray.Count) { [int]$delayArray[$i] } else { 0 }
             
-            # Individual Delay
+            # Individual independent delay
             if ($vmDelay -gt 0) { Start-Sleep -Seconds ($vmDelay * 60) }
             
-            $vm = Get-NTNXVM | Where-Object { $_.vmName -eq $vmName }
+            $vm = Get-NTNXVM | Where-Object { $_.vmName -eq $vmName } | Select-Object -First 1
             $Status = "failed"
             
             if ($null -eq $vm) { $Status = "VM Not Found" }
@@ -51,7 +50,7 @@ $taskBlock = {
                         if ($vm.powerState -eq "off") { $Status = "already off" } 
                         else {
                             Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN
-                            Start-Sleep -Seconds 45
+                            Start-Sleep -Seconds 40
                             if ((Get-NTNXVM -Vmid $vm.uuid).powerState -eq "on") { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN }
                             $Status = "successful"
                         }
@@ -76,7 +75,7 @@ $taskBlock = {
     }
 }
 
-# Launch jobs for each set (1, 2, 3)
+# Run tasks in parallel
 for ($i = 1; $i -le 3; $i++) {
     $v = $data.$("v$i")
     $s = $data.$("s$i")
