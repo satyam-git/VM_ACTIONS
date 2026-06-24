@@ -71,7 +71,7 @@ $taskBlock = {
                     if ($needsRetry) {
                         $transition = switch ($action) { "start" { "ON" }; "stop" { "ACPI_SHUTDOWN" }; "restart" { "ACPI_REBOOT" } }
                         Set-NTNXVMPowerState -Vmid $vm.uuid -Transition $transition
-                        $status = "triggered (with retry)"
+                        $status = "Successful"
                     }
                 }
             }
