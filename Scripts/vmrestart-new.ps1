@@ -18,7 +18,6 @@ $taskBlock = {
     
     try {
         $finalPass = $plainPass | ConvertTo-SecureString -AsPlainText -Force
-        
         Connect-NTNXCluster -Server $siteMap[$site] -UserName $user -Password $finalPass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
         
         $vmArray = $vmNames.Split(',').Trim()
@@ -31,10 +30,27 @@ $taskBlock = {
             
             $vm = Get-NTNXVM | Where-Object { $_.vmName -ieq $vmName } | Select-Object -First 1
             $status = "successful"
+            
             if ($null -eq $vm) { $status = "VM Not Found" }
             else {
                 $transition = switch ($action) { "start" { "ON" }; "stop" { "ACPI_SHUTDOWN" }; "restart" { "ACPI_REBOOT" } }
+                
+                # Strike 1: Execute action
                 Set-NTNXVMPowerState -Vmid $vm.uuid -Transition $transition
+                
+                # Wait 30 seconds for state transition
+                Start-Sleep -Seconds 30
+                
+                # Strike 2: Verify and Retry
+                $currentVM = Get-NTNXVM -Vmid $vm.uuid
+                $isDown = ($currentVM.powerState -eq "off")
+                $isOn = ($currentVM.powerState -eq "on")
+                $needsRetry = ($action -eq "start" -and -not $isOn) -or (($action -eq "stop" -or $action -eq "restart") -and -not $isDown)
+                
+                if ($needsRetry) {
+                    Set-NTNXVMPowerState -Vmid $vm.uuid -Transition $transition
+                    $status = "triggered (with retry)"
+                }
             }
             "$site,$vmName,$action,$status" | Out-File -FilePath $tempLogPath -Append -Encoding utf8
         }
