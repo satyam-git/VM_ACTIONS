@@ -1,19 +1,23 @@
 param($JsonInputs)
 
+# 1. Parse Input
 $data = $JsonInputs | ConvertFrom-Json
 $logPath = Join-Path $env:GITHUB_WORKSPACE "data\vm_execution_log.csv"
 $tempDir = Join-Path $env:GITHUB_WORKSPACE "data\temp_logs"
 
+# 2. Ensure Directories Exist
 if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
 if (-not (Test-Path $tempDir)) { New-Item -ItemType Directory -Path $tempDir -Force | Out-Null }
 if (Test-Path $logPath) { Remove-Item $logPath }
 
+# 3. Define Parallel Job Logic
 $taskBlock = {
     param($site, $vmNames, $action, $delays, $user, $tempLogPath, $siteMap)
     
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin }
     
     try {
+        # Securely retrieve credentials
         $key = Get-Content "C:\Scripts\key.txt" -ErrorAction Stop
         # pragma: ignore:PSAvoidUsingConvertToSecureStringWithKey
         $secPass = Get-Content "C:\Scripts\nutanix_creds.txt" -ErrorAction Stop | ConvertTo-SecureString -Key $key
@@ -31,7 +35,7 @@ $taskBlock = {
             $vmName = $vmArray[$i]
             $vmDelay = if ($i -lt $delayArray.Count) { [int]$delayArray[$i] } else { 0 }
             
-            # INDEPENDENT DELAY: Every VM waits its own time immediately before processing
+            # Independent Per-VM Delay
             if ($vmDelay -gt 0) { Start-Sleep -Seconds ($vmDelay * 60) }
             
             $vm = Get-NTNXVM | Where-Object { $_.vmName -ieq $vmName } | Select-Object -First 1
@@ -39,26 +43,21 @@ $taskBlock = {
             
             if ($null -eq $vm) { $status = "VM Not Found" }
             else {
-                $targetState = if ($action -eq "start") { "on" } else { "off" }
                 $transition = switch ($action) { 
                     "start" { "ON" }; "stop" { "ACPI_SHUTDOWN" }; "restart" { "ACPI_REBOOT" } 
                 }
-
-                # Trigger Action
                 Set-NTNXVMPowerState -Vmid $vm.uuid -Transition $transition
                 
-                # VALIDATION LOOP: Wait 40s and check if action worked
-                Start-Sleep -Seconds 40
+                # Validation & Retry Logic (Optimized 15s wait)
+                Start-Sleep -Seconds 15
                 $currentVM = Get-NTNXVM -Vmid $vm.uuid
+                $targetMet = ($action -eq "start" -and $currentVM.powerState -eq "on") -or 
+                             (($action -eq "stop" -or $action -eq "restart") -and $currentVM.powerState -eq "off")
                 
-                if (($action -eq "start" -and $currentVM.powerState -ne "on") -or 
-                    (($action -eq "stop" -or $action -eq "restart") -and $currentVM.powerState -eq "on")) {
-                    # Retry once if state hasn't changed
+                if (-not $targetMet) {
                     Set-NTNXVMPowerState -Vmid $vm.uuid -Transition $transition
                     $status = "triggered (with retry)"
-                } else {
-                    $status = "successful"
-                }
+                } else { $status = "successful" }
             }
             "$site,$vmName,$action,$status" | Out-File -FilePath $tempLogPath -Append -Encoding utf8
         }
@@ -66,8 +65,8 @@ $taskBlock = {
     finally { Disconnect-NTNXCluster -Servers $siteMap[$site] -ErrorAction SilentlyContinue }
 }
 
+# 4. Launch Jobs
 $siteMap = @{ "Banglore" = "192.168.136.50"; "Chennai" = "10.0.0.10" }
-
 for ($i = 1; $i -le 3; $i++) {
     $v = $data.$("v$i"); $s = $data.$("s$i"); $a = $data.$("a$i"); $d = $data.$("d$i")
     if (-not [string]::IsNullOrWhiteSpace($v) -and $s -ne "None") {
@@ -77,6 +76,8 @@ for ($i = 1; $i -le 3; $i++) {
 }
 
 Get-Job | Wait-Job | Receive-Job
+
+# 5. Consolidate Results
 if (Test-Path $tempDir) {
     Get-ChildItem "$tempDir\*.csv" | Get-Content | Out-File -FilePath $logPath -Encoding utf8
     Remove-Item $tempDir -Recurse -Force
