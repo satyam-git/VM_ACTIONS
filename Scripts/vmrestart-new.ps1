@@ -42,7 +42,7 @@ $taskBlock = {
                 }
                 Set-NTNXVMPowerState -Vmid $vm.uuid -Transition $transition
                 
-                Start-Sleep -Seconds 15
+                Start-Sleep -Seconds 30
                 $currentVM = Get-NTNXVM -Vmid $vm.uuid
                 $targetMet = ($action -eq "start" -and $currentVM.powerState -eq "on") -or 
                              (($action -eq "stop" -or $action -eq "restart") -and $currentVM.powerState -eq "off")
