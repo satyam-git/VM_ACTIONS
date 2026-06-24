@@ -11,18 +11,12 @@ if (Test-Path $logPath) { Remove-Item $logPath }
 $taskBlock = {
     param($site, $vmNames, $action, $delays, $user, $tempLogPath, $siteMap)
     
+    # Grab the secret injected into this process environment
+    $plainPass = $env:NUTANIX_PASS_JOB
+    
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin }
     
     try {
-        # Secure credential handling
-        $key = Get-Content "C:\Scripts\key.txt" -ErrorAction Stop
-        # pragma: ignore:PSAvoidUsingConvertToSecureStringWithKey
-        $secPass = Get-Content "C:\Scripts\nutanix_creds.txt" -ErrorAction Stop | ConvertTo-SecureString -Key $key
-        
-        # Convert to plain text for older module compatibility
-        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secPass)
-        $plainPass = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
-        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
         $finalPass = $plainPass | ConvertTo-SecureString -AsPlainText -Force
         
         Connect-NTNXCluster -Server $siteMap[$site] -UserName $user -Password $finalPass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
@@ -42,7 +36,6 @@ $taskBlock = {
                 $transition = switch ($action) { "start" { "ON" }; "stop" { "ACPI_SHUTDOWN" }; "restart" { "ACPI_REBOOT" } }
                 Set-NTNXVMPowerState -Vmid $vm.uuid -Transition $transition
             }
-            # Force UTF8 encoding to prevent garbled text
             "$site,$vmName,$action,$status" | Out-File -FilePath $tempLogPath -Append -Encoding utf8
         }
     } catch { "$site,$vmNames,Error,$($_.Exception.Message)" | Out-File -FilePath $tempLogPath -Append -Encoding utf8 }
@@ -55,13 +48,14 @@ for ($i = 1; $i -le 3; $i++) {
     $v = $data.$("v$i"); $s = $data.$("s$i"); $a = $data.$("a$i"); $d = $data.$("d$i")
     if (-not [string]::IsNullOrWhiteSpace($v) -and $s -ne "None") {
         $jobLog = Join-Path $tempDir "job_$i.csv"
+        # Pass the secret to the environment of the job
+        $env:NUTANIX_PASS_JOB = $env:NUTANIX_PASS
         Start-Job -ScriptBlock $taskBlock -ArgumentList $s, $v, $a, $d, $env:NUTANIX_USER, $jobLog, $siteMap
     }
 }
 
 Get-Job | Wait-Job | Receive-Job
 
-# Combine logs with UTF8 encoding
 if (Test-Path $tempDir) {
     Get-ChildItem "$tempDir\*.csv" | ForEach-Object { Get-Content $_ | Out-File -FilePath $logPath -Append -Encoding utf8 }
     Remove-Item $tempDir -Recurse -Force
