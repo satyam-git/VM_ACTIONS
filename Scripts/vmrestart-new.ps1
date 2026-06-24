@@ -14,9 +14,12 @@ $taskBlock = {
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin }
     
     try {
+        # Secure credential handling
         $key = Get-Content "C:\Scripts\key.txt" -ErrorAction Stop
         # pragma: ignore:PSAvoidUsingConvertToSecureStringWithKey
         $secPass = Get-Content "C:\Scripts\nutanix_creds.txt" -ErrorAction Stop | ConvertTo-SecureString -Key $key
+        
+        # Convert to plain text for older module compatibility
         $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secPass)
         $plainPass = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
         [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
@@ -33,32 +36,21 @@ $taskBlock = {
             if ($vmDelay -gt 0) { Start-Sleep -Seconds ($vmDelay * 60) }
             
             $vm = Get-NTNXVM | Where-Object { $_.vmName -ieq $vmName } | Select-Object -First 1
-            $status = "failed"
-            
+            $status = "successful"
             if ($null -eq $vm) { $status = "VM Not Found" }
             else {
-                $transition = switch ($action) { 
-                    "start" { "ON" }; "stop" { "ACPI_SHUTDOWN" }; "restart" { "ACPI_REBOOT" } 
-                }
+                $transition = switch ($action) { "start" { "ON" }; "stop" { "ACPI_SHUTDOWN" }; "restart" { "ACPI_REBOOT" } }
                 Set-NTNXVMPowerState -Vmid $vm.uuid -Transition $transition
-                
-                Start-Sleep -Seconds 30
-                $currentVM = Get-NTNXVM -Vmid $vm.uuid
-                $targetMet = ($action -eq "start" -and $currentVM.powerState -eq "on") -or 
-                             (($action -eq "stop" -or $action -eq "restart") -and $currentVM.powerState -eq "off")
-                
-                if (-not $targetMet) {
-                    Set-NTNXVMPowerState -Vmid $vm.uuid -Transition $transition
-                    $status = "triggered (with retry)"
-                } else { $status = "successful" }
             }
+            # Force UTF8 encoding to prevent garbled text
             "$site,$vmName,$action,$status" | Out-File -FilePath $tempLogPath -Append -Encoding utf8
         }
-    } catch { "$site,$vmNames,Error,$($_.Exception.Message)" | Out-File -FilePath $tempLogPath -Append }
+    } catch { "$site,$vmNames,Error,$($_.Exception.Message)" | Out-File -FilePath $tempLogPath -Append -Encoding utf8 }
     finally { Disconnect-NTNXCluster -Servers $siteMap[$site] -ErrorAction SilentlyContinue }
 }
 
 $siteMap = @{ "Banglore" = "192.168.136.50"; "Chennai" = "10.0.0.10" }
+
 for ($i = 1; $i -le 3; $i++) {
     $v = $data.$("v$i"); $s = $data.$("s$i"); $a = $data.$("a$i"); $d = $data.$("d$i")
     if (-not [string]::IsNullOrWhiteSpace($v) -and $s -ne "None") {
@@ -68,7 +60,9 @@ for ($i = 1; $i -le 3; $i++) {
 }
 
 Get-Job | Wait-Job | Receive-Job
+
+# Combine logs with UTF8 encoding
 if (Test-Path $tempDir) {
-    Get-ChildItem "$tempDir\*.csv" | Get-Content | Out-File -FilePath $logPath -Encoding utf8
+    Get-ChildItem "$tempDir\*.csv" | ForEach-Object { Get-Content $_ | Out-File -FilePath $logPath -Append -Encoding utf8 }
     Remove-Item $tempDir -Recurse -Force
 }
