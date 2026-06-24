@@ -11,7 +11,6 @@ if (Test-Path $logPath) { Remove-Item $logPath }
 $taskBlock = {
     param($site, $vmNames, $action, $delays, $user, $tempLogPath, $siteMap)
     
-    # Grab the secret injected into this process environment
     $plainPass = $env:NUTANIX_PASS_JOB
     
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin }
@@ -21,11 +20,22 @@ $taskBlock = {
         Connect-NTNXCluster -Server $siteMap[$site] -UserName $user -Password $finalPass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
         
         $vmArray = $vmNames.Split(',').Trim()
-        $delayArray = if ($delays) { $delays.Split(',').Trim() } else { @() }
+        
+        # --- NEW ENHANCEMENT: Delay Logic ---
+        $isMultiDelay = ($delays -and $delays.Contains(','))
+        $delayValues = if ($isMultiDelay) { $delays.Split(',').Trim() } else { $delays }
         
         for ($i = 0; $i -lt $vmArray.Count; $i++) {
             $vmName = $vmArray[$i]
-            $vmDelay = if ($i -lt $delayArray.Count) { [int]$delayArray[$i] } else { 0 }
+            
+            # డెలే లెక్కించడం
+            $vmDelay = 0
+            if ($isMultiDelay) {
+                if ($i -lt $delayValues.Count) { $vmDelay = [int]$delayValues[$i] }
+            } elseif ($delays) {
+                $vmDelay = [int]$delayValues
+            }
+            
             if ($vmDelay -gt 0) { Start-Sleep -Seconds ($vmDelay * 60) }
             
             $vm = Get-NTNXVM | Where-Object { $_.vmName -ieq $vmName } | Select-Object -First 1
@@ -33,7 +43,6 @@ $taskBlock = {
             
             if ($null -eq $vm) { $status = "VM Not Found" }
             else {
-                # --- Already State Check Logic ---
                 $isAlreadyOn = ($vm.powerState -eq "on")
                 
                 switch ($action) {
@@ -51,7 +60,6 @@ $taskBlock = {
                     }
                 }
 
-                # --- Retry Logic (Strike 2) ---
                 if ($status -eq "successful") {
                     Start-Sleep -Seconds 30
                     $currentVM = Get-NTNXVM -Vmid $vm.uuid
@@ -73,14 +81,12 @@ $taskBlock = {
     finally { Disconnect-NTNXCluster -Servers $siteMap[$site] -ErrorAction SilentlyContinue }
 }
 
-# Site Mapping Dictionary
 $siteMap = @{ "Banglore" = "192.168.136.50"; "Chennai" = "10.0.0.10" }
 
 for ($i = 1; $i -le 3; $i++) {
     $v = $data.$("v$i"); $s = $data.$("s$i"); $a = $data.$("a$i"); $d = $data.$("d$i")
     if (-not [string]::IsNullOrWhiteSpace($v) -and $s -ne "None") {
         $jobLog = Join-Path $tempDir "job_$i.csv"
-        # Secret Injection for Background Job
         $env:NUTANIX_PASS_JOB = $env:NUTANIX_PASS
         Start-Job -ScriptBlock $taskBlock -ArgumentList $s, $v, $a, $d, $env:NUTANIX_USER, $jobLog, $siteMap
     }
