@@ -15,17 +15,18 @@ if (Test-Path $logPath) { Remove-Item $logPath }
 $taskBlock = {
     param($site, $vmNames, $action, $delays, $user, $tempLogPath, $siteMap)
     
-    # Load module
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin }
     
-    # Securely load credentials using the shared key
     try {
+        # Securely load password as a plain string for the older -Password parameter
         $key = Get-Content "C:\Scripts\key.txt" -ErrorAction Stop
         # pragma: ignore:PSAvoidUsingConvertToSecureStringWithKey
-        $encryptedPass = Get-Content "C:\Scripts\nutanix_creds.txt" -ErrorAction Stop | ConvertTo-SecureString -Key $key
-        $creds = New-Object System.Management.Automation.PSCredential($user, $encryptedPass)
+        $secPass = Get-Content "C:\Scripts\nutanix_creds.txt" -ErrorAction Stop | ConvertTo-SecureString -Key $key
+        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secPass)
+        $plainPass = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
         
-        Connect-NTNXCluster -Server $siteMap[$site] -Credential $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
+        Connect-NTNXCluster -Server $siteMap[$site] -UserName $user -Password $plainPass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
         
         $vmArray = $vmNames.Split(',').Trim()
         $delayArray = if ($delays) { $delays.Split(',').Trim() } else { @() }
@@ -48,24 +49,19 @@ $taskBlock = {
     finally { Disconnect-NTNXCluster -Servers $siteMap[$site] -ErrorAction SilentlyContinue }
 }
 
-# 3. Launch Jobs with Pre-Validated Variables
+# 3. Launch Jobs
 $siteMap = @{ "Banglore" = "192.168.136.50"; "Chennai" = "10.0.0.10" }
 
 for ($i = 1; $i -le 3; $i++) {
-    # Extract properties safely
     $v = $data.$("v$i"); $s = $data.$("s$i"); $a = $data.$("a$i"); $d = $data.$("d$i")
-    
-    # Only run if input is valid
     if (-not [string]::IsNullOrWhiteSpace($v) -and $s -ne "None") {
         $jobLog = Join-Path $tempDir "job_$i.csv"
         Start-Job -ScriptBlock $taskBlock -ArgumentList $s, $v, $a, $d, $env:NUTANIX_USER, $jobLog, $siteMap
     }
 }
 
-# 4. Wait for all jobs and merge logs
 Get-Job | Wait-Job | Receive-Job
 
-# Combine results
 if (Test-Path $tempDir) {
     Get-ChildItem "$tempDir\*.csv" | Get-Content | Out-File -FilePath $logPath -Encoding utf8
     Remove-Item $tempDir -Recurse -Force
