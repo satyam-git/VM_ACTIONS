@@ -11,7 +11,7 @@ if (Test-Path $logPath) { Remove-Item $logPath }
 $taskBlock = {
     param($site, $vmNames, $action, $delays, $user, $pass, $tempLogPath, $siteMap)
     
-    # FIX: Load snap-in INSIDE the job to ensure commands are recognized
+    # FIX: Load snap-in INSIDE the job to ensure commands are recognized 
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { 
         Add-PSSnapin NutanixCmdletsPSSnapin 
     }
@@ -75,7 +75,7 @@ for ($i = 1; $i -le 3; $i++) {
     $v = $data.$("v$i"); $s = $data.$("s$i"); $a = $data.$("a$i"); $d = $data.$("d$i")
     if (-not [string]::IsNullOrWhiteSpace($v) -and $s -ne "None") {
         $jobLog = Join-Path $tempDir "job_$i.csv"
-        # FIX: Pass password ($env:NUTANIX_PASS) as an explicit argument to the job
+        # FIX: Pass password ($env:NUTANIX_PASS) as an explicit argument to the job 
         Start-Job -ScriptBlock $taskBlock -ArgumentList $s, $v, $a, $d, $env:NUTANIX_USER, $env:NUTANIX_PASS, $jobLog, $siteMap
     }
 }
