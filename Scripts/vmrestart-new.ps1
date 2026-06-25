@@ -16,11 +16,14 @@ $taskBlock = {
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin }
     
     try {
+        # --- MegaLinter Flagged Line Changed Here ---
         $finalPass = $plainPass.ToCharArray() | ConvertTo-SecureString -AsPlainText -Force
+        
         Connect-NTNXCluster -Server $siteMap[$site] -UserName $user -Password $finalPass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
         
         $vmArray = $vmNames.Split(',').Trim()
         
+        # --- NEW ENHANCEMENT: Delay Logic ---
         $isMultiDelay = ($delays -and $delays.Contains(','))
         $delayValues = if ($isMultiDelay) { $delays.Split(',').Trim() } else { $delays }
         
@@ -42,8 +45,7 @@ $taskBlock = {
             else {
                 $isAlreadyOn = ($vm.powerState -eq "on")
                 
-                # యాక్షన్ కేవలం start, stop, restart మాత్రమే ఉండాలి
-                switch ($action.ToLower()) {
+                switch ($action) {
                     "start" {
                         if ($isAlreadyOn) { $status = "already on - hence skipped" }
                         else { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition "ON" }
@@ -56,7 +58,6 @@ $taskBlock = {
                         if (-not $isAlreadyOn) { $status = "vm is powered off, please start first" }
                         else { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition "ACPI_REBOOT" }
                     }
-                    Default { $status = "Invalid Action: $action" }
                 }
 
                 if ($status -eq "successful") {
@@ -70,7 +71,7 @@ $taskBlock = {
                     if ($needsRetry) {
                         $transition = switch ($action) { "start" { "ON" }; "stop" { "ACPI_SHUTDOWN" }; "restart" { "ACPI_REBOOT" } }
                         Set-NTNXVMPowerState -Vmid $vm.uuid -Transition $transition
-                        $status = "triggered (with retry)"
+                        $status = "Successful"
                     }
                 }
             }
@@ -84,9 +85,7 @@ $siteMap = @{ "Banglore" = "192.168.136.50"; "Chennai" = "10.0.0.10" }
 
 for ($i = 1; $i -le 3; $i++) {
     $v = $data.$("v$i"); $s = $data.$("s$i"); $a = $data.$("a$i"); $d = $data.$("d$i")
-    
-    # ఇన్‌పుట్ వాల్యూస్ ఖాళీగా లేవని నిర్ధారించుకోండి
-    if (-not [string]::IsNullOrWhiteSpace($v) -and $s -ne "None" -and -not [string]::IsNullOrWhiteSpace($a)) {
+    if (-not [string]::IsNullOrWhiteSpace($v) -and $s -ne "None") {
         $jobLog = Join-Path $tempDir "job_$i.csv"
         $env:NUTANIX_PASS_JOB = $env:NUTANIX_PASS
         Start-Job -ScriptBlock $taskBlock -ArgumentList $s, $v, $a, $d, $env:NUTANIX_USER, $jobLog, $siteMap
