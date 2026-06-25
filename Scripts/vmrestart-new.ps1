@@ -11,13 +11,15 @@ if (Test-Path $logPath) { Remove-Item $logPath }
 $taskBlock = {
     param($site, $vmNames, $action, $delays, $user, $tempLogPath, $siteMap)
     
-    # IMPORT MODULE INSIDE THE JOB to prevent "Command not recognized" errors
-    Import-Module Nutanix.Cli -ErrorAction Stop
+    # --- FIX: Load snap-in INSIDE the job to ensure commands are recognized ---
+    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { 
+        Add-PSSnapin NutanixCmdletsPSSnapin 
+    }
     
     $plainPass = $env:NUTANIX_PASS_JOB
     
     try {
-        # Secure credential creation (Compatible with PS 7 and avoids MegaLinter issues)
+        # Secure credential creation
         $securePassword = ConvertTo-SecureString -String $plainPass -AsPlainText -Force
         $credential = [System.Management.Automation.PSCredential]::new($user, $securePassword)
         
@@ -25,7 +27,6 @@ $taskBlock = {
         
         $vmArray = $vmNames.Split(',').Trim()
         
-        # Delay Logic
         $isMultiDelay = ($delays -and $delays.Contains(','))
         $delayValues = if ($isMultiDelay) { $delays.Split(',').Trim() } else { $delays }
         
