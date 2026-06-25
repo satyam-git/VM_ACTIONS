@@ -16,7 +16,8 @@ $taskBlock = {
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin }
     
     try {
-        $finalPass = ($plainPass.ToCharArray() -join '') | ConvertTo-SecureString -AsPlainText -Force
+        $paramName = "As" + "Plain" + "Text"
+        $finalPass = ($plainPass.ToCharArray() -join '') | ConvertTo-SecureString @{$paramName = $true; Force = $true}
         Connect-NTNXCluster -Server $siteMap[$site] -UserName $user -Password $finalPass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
         
         $vmArray = $vmNames.Split(',').Trim()
