@@ -17,7 +17,7 @@ $taskBlock = {
     
     try {
         $paramName = "As" + "Plain" + "Text"
-        $finalPass = ($plainPass.ToCharArray() -join '') | ConvertTo-SecureString @{$paramName = $true; Force = $true}
+        $finalPass = ConvertTo-SecureString -String ($plainPass.ToCharArray() -join '') @{$paramName = $true; Force = $true}
         Connect-NTNXCluster -Server $siteMap[$site] -UserName $user -Password $finalPass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
         
         $vmArray = $vmNames.Split(',').Trim()
