@@ -11,22 +11,17 @@ if (Test-Path $logPath) { Remove-Item $logPath }
 $taskBlock = {
     param($site, $vmNames, $action, $delays, $user, $tempLogPath, $siteMap)
     
-    # --- FIX: Load snap-in INSIDE the job to ensure commands are recognized ---
-    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { 
-        Add-PSSnapin NutanixCmdletsPSSnapin 
-    }
+    Import-Module Nutanix.Cli -ErrorAction SilentlyContinue
     
     $plainPass = $env:NUTANIX_PASS_JOB
     
     try {
-        # Secure credential creation
-        $securePassword = ConvertTo-SecureString -String $plainPass -AsPlainText -Force
-        $credential = [System.Management.Automation.PSCredential]::new($user, $securePassword)
+        # FIX: Convert password to SecureString and connect using explicit Username/Password parameters
+        $pass = ConvertTo-SecureString -String $plainPass -AsPlainText -Force
         
-        Connect-NTNXCluster -Server $siteMap[$site] -Credential $credential -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
+        Connect-NTNXCluster -Server $siteMap[$site] -UserName $user -Password $pass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
         
         $vmArray = $vmNames.Split(',').Trim()
-        
         $isMultiDelay = ($delays -and $delays.Contains(','))
         $delayValues = if ($isMultiDelay) { $delays.Split(',').Trim() } else { $delays }
         
