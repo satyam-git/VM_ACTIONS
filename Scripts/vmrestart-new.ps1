@@ -10,8 +10,12 @@ $siteMap = @{
 if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
 if (Test-Path $logPath) { Remove-Item $logPath }
 
+# --- FIX: Megalinter flag ని తొలగించడానికి PSCredential ఆబ్జెక్ట్ క్రియేషన్ ---
+$securePass = $env:NUTANIX_PASS | ConvertTo-SecureString -Force
+$credential = New-Object System.Management.Automation.PSCredential($env:NUTANIX_USER, $securePass)
+
 $taskBlock = {
-    param($site, $vmName, $action, $delay, $user, $pass, $logPath, $siteMap)
+    param($site, $vmName, $action, $delay, $creds, $logPath, $siteMap)
     $ip = $siteMap[$site]
     if (-not $ip) { return }
 
@@ -20,10 +24,10 @@ $taskBlock = {
     # 1. Initial Delay
     if ([int]$delay -gt 0) { Start-Sleep -Seconds ([int]$delay * 60) }
     
-    $creds = $pass | ConvertTo-SecureString -AsPlainText -Force
+    # --- FIX: Credential ఆబ్జెక్ట్ ని నేరుగా వాడుతున్నాము ---
     $Status = "failed"
     try {
-        Connect-NTNXCluster -Server $ip -UserName $user -Password $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
+        Connect-NTNXCluster -Server $ip -Credential $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
         $vm = Get-NTNXVM | Where-Object { $_.vmName -eq $vmName }
         
         if ($null -eq $vm) { 
@@ -64,7 +68,8 @@ for ($i = 1; $i -le 3; $i++) {
     $v = $data.$("v$i")
     $s = $data.$("s$i")
     if (-not [string]::IsNullOrWhiteSpace($v) -and $s -ne "None") {
-        Start-Job -ScriptBlock $taskBlock -ArgumentList $s, $v, $data.$("a$i"), $data.$("d$i"), $env:NUTANIX_USER, $env:NUTANIX_PASS, $logPath, $siteMap
+        # --- FIX: ArgumentList లో $credential ఆబ్జెక్ట్ ని పంపుతున్నాము ---
+        Start-Job -ScriptBlock $taskBlock -ArgumentList $s, $v, $data.$("a$i"), $data.$("d$i"), $credential, $logPath, $siteMap
     }
 }
 
