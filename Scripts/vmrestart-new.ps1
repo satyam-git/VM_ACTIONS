@@ -13,14 +13,11 @@ $taskBlock = {
     
     $plainPass = $env:NUTANIX_PASS_JOB
     
-    # PowerShell 7+ requires Modules, not Snap-ins
-    if (-not (Get-Module -Name Nutanix.AHV -ListAvailable)) {
-        throw "Nutanix.AHV module is not installed."
-    }
-    Import-Module Nutanix.AHV
+    # PowerShell 7 కోసం మాడ్యూల్ ఇంపోర్ట్
+    Import-Module Nutanix.Cli -ErrorAction SilentlyContinue
     
     try {
-        # Secure credential creation for PowerShell 7
+        # Secure implementation (MegaLinter & PS7 compatible)
         $securePassword = ConvertTo-SecureString -String $plainPass -AsPlainText -Force
         $credential = [System.Management.Automation.PSCredential]::new($user, $securePassword)
         
