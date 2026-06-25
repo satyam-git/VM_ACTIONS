@@ -11,23 +11,28 @@ if (Test-Path $logPath) { Remove-Item $logPath }
 $taskBlock = {
     param($site, $vmNames, $action, $delays, $user, $tempLogPath, $siteMap)
     
-    Import-Module Nutanix.Cli -ErrorAction SilentlyContinue
-    
     $plainPass = $env:NUTANIX_PASS_JOB
     
+    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin }
+    
     try {
-        # FIX: Convert password to SecureString and connect using explicit Username/Password parameters
-        $pass = ConvertTo-SecureString -String $plainPass -AsPlainText -Force
-        
-        Connect-NTNXCluster -Server $siteMap[$site] -UserName $user -Password $pass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
+        $finalPass = $plainPass | ConvertTo-SecureString -AsPlainText -Force
+        Connect-NTNXCluster -Server $siteMap[$site] -UserName $user -Password $finalPass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
         
         $vmArray = $vmNames.Split(',').Trim()
+        
+        # --- NEW ENHANCEMENT: Delay Logic ---
         $isMultiDelay = ($delays -and $delays.Contains(','))
         $delayValues = if ($isMultiDelay) { $delays.Split(',').Trim() } else { $delays }
         
         for ($i = 0; $i -lt $vmArray.Count; $i++) {
             $vmName = $vmArray[$i]
-            $vmDelay = if ($isMultiDelay -and ($i -lt $delayValues.Count)) { [int]$delayValues[$i] } elseif ($delays) { [int]$delayValues } else { 0 }
+            $vmDelay = 0
+            if ($isMultiDelay) {
+                if ($i -lt $delayValues.Count) { $vmDelay = [int]$delayValues[$i] }
+            } elseif ($delays) {
+                $vmDelay = [int]$delayValues
+            }
             
             if ($vmDelay -gt 0) { Start-Sleep -Seconds ($vmDelay * 60) }
             
@@ -39,9 +44,18 @@ $taskBlock = {
                 $isAlreadyOn = ($vm.powerState -eq "on")
                 
                 switch ($action) {
-                    "start"   { if ($isAlreadyOn) { $status = "already on - hence skipped" } else { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition "ON" } }
-                    "stop"    { if (-not $isAlreadyOn) { $status = "already off - hence skipped" } else { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition "ACPI_SHUTDOWN" } }
-                    "restart" { if (-not $isAlreadyOn) { $status = "vm is powered off, please start first" } else { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition "ACPI_REBOOT" } }
+                    "start" {
+                        if ($isAlreadyOn) { $status = "already on - hence skipped" }
+                        else { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition "ON" }
+                    }
+                    "stop" {
+                        if (-not $isAlreadyOn) { $status = "already off - hence skipped" }
+                        else { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition "ACPI_SHUTDOWN" }
+                    }
+                    "restart" {
+                        if (-not $isAlreadyOn) { $status = "vm is powered off, please start first" }
+                        else { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition "ACPI_REBOOT" }
+                    }
                 }
 
                 if ($status -eq "successful") {
@@ -50,7 +64,9 @@ $taskBlock = {
                     $isDown = ($currentVM.powerState -eq "off")
                     $isOn = ($currentVM.powerState -eq "on")
                     
-                    if (($action -eq "start" -and -not $isOn) -or (($action -eq "stop" -or $action -eq "restart") -and -not $isDown)) {
+                    $needsRetry = ($action -eq "start" -and -not $isOn) -or (($action -eq "stop" -or $action -eq "restart") -and -not $isDown)
+                    
+                    if ($needsRetry) {
                         $transition = switch ($action) { "start" { "ON" }; "stop" { "ACPI_SHUTDOWN" }; "restart" { "ACPI_REBOOT" } }
                         Set-NTNXVMPowerState -Vmid $vm.uuid -Transition $transition
                         $status = "Successful"
