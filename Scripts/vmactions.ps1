@@ -10,12 +10,14 @@ $siteMap = @{
 if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
 if (Test-Path $logPath) { Remove-Item $logPath }
 
-# Credentials initialization
+# Ensure Nutanix module is loaded
+if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { 
+    Add-PSSnapin NutanixCmdletsPSSnapin 
+}
+
 $creds = New-Object System.Security.SecureString
 foreach ($char in $env:NUTANIX_PASS.ToCharArray()) { $creds.AppendChar($char) }
 $creds.MakeReadOnly()
-
-if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin }
 
 for ($i = 1; $i -le 3; $i++) {
     $v = $data.$("v$i")
@@ -33,9 +35,7 @@ for ($i = 1; $i -le 3; $i++) {
             
             for ($j = 0; $j -lt $vmArray.Count; $j++) {
                 $vmName = $vmArray[$j]
-                # Delay logic: ఒక్క ఇన్పుట్ ఉంటే అందరికీ వర్తిస్తుంది, లేదంటే ఇండెక్స్ బట్టి వర్తిస్తుంది
-                $vmDelay = if ($delayArray.Count -eq 1 -and -not [string]::IsNullOrWhiteSpace($delayArray[0])) { [int]$delayArray[0] } `
-                           elseif ($j -lt $delayArray.Count) { [int]$delayArray[$j] } else { 0 }
+                $vmDelay = if ($delayArray.Count -eq 1) { [int]$delayArray[0] } elseif ($j -lt $delayArray.Count) { [int]$delayArray[$j] } else { 0 }
                 
                 if ($vmDelay -gt 0) { Start-Sleep -Seconds ($vmDelay * 60) }
                 
@@ -50,13 +50,10 @@ for ($i = 1; $i -le 3; $i++) {
                             else { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ON; $Status = "successful" }
                         }
                         "stop" { 
-                            if ($vm.powerState -eq "off") { $Status = "already off" } 
-                            else { 
-                                Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN
-                                Start-Sleep -Seconds 30
-                                Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN
-                                $Status = "successful"
-                            }
+                            Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN
+                            Start-Sleep -Seconds 30
+                            Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN
+                            $Status = "successful"
                         }
                         "restart" { 
                             Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_REBOOT
