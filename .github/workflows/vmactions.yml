@@ -1,10 +1,11 @@
+
 name: Nutanix VMActions
 
 on:
   workflow_dispatch:
     inputs:
       s1: { description: '1: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
-      v1: { description: '1: VM Names (comma separated)', required: false, type: string }
+      v1: { description: '1: VM Names', required: false, type: string }
       a1: { description: '1: Action', required: false, type: choice, options: [start, stop, restart] }
       d1: { description: '1: Delay (min)', required: false, default: '0', type: string }
       s2: { description: '2: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
@@ -30,7 +31,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE\Scripts\vmactions.ps1" -JsonInputs $env:INPUTS_JSON
       
-      - name: Display Execution Summary
+      - name: Display Summary
         shell: powershell
         run: |
           if (Test-Path "data/vm_execution_log.csv") {
