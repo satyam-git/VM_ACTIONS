@@ -1,4 +1,4 @@
-name: Nutanix 3-VM Parallel
+name: Nutanix VMActions
 
 on:
   workflow_dispatch:
