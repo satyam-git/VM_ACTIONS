@@ -1,4 +1,4 @@
-name: Nutanix VMActions
+name: Nutanix 3-VM Parallel
 
 on:
   workflow_dispatch:
@@ -21,6 +21,7 @@ jobs:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
+      
       - name: Run Parallel Nutanix Script
         shell: powershell
         env:
@@ -35,9 +36,8 @@ jobs:
         run: |
           if (Test-Path "data/vm_execution_log.csv") {
             "### Execution Summary" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            "| Site Name | vmname | action | status |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            "| Site Name | VM Name | Action | Status |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             "| :--- | :--- | :--- | :--- |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            
             Import-Csv "data/vm_execution_log.csv" -Header "Site", "VM", "Action", "Status" | ForEach-Object {
               "| $($_.Site) | $($_.VM) | $($_.Action) | $($_.Status) |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             }
