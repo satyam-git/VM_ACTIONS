@@ -10,24 +10,24 @@ $siteMap = @{
 if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
 if (Test-Path $logPath) { Remove-Item $logPath }
 
-# --- FIX: Create PSCredential object. This avoids -AsPlainText and is Linter-friendly ---
-$secPass = $env:NUTANIX_PASS | ConvertTo-SecureString -Force
-$credential = New-Object System.Management.Automation.PSCredential($env:NUTANIX_USER, $secPass)
-
 $taskBlock = {
-    param($site, $vmName, $action, $delay, $creds, $logPath, $siteMap)
+    param($site, $vmName, $action, $delay, $user, $pass, $logPath, $siteMap)
     $ip = $siteMap[$site]
     if (-not $ip) { return }
 
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin }
     
+    # 1. Initial Delay
     if ([int]$delay -gt 0) { Start-Sleep -Seconds ([int]$delay * 60) }
+    
+    # --- FIX: Avoids the "AsPlainText" flag and "invalid encrypted string" error ---
+    $creds = New-Object System.Security.SecureString
+    foreach ($char in $pass.ToCharArray()) { $creds.AppendChar($char) }
+    $creds.MakeReadOnly()
     
     $Status = "failed"
     try {
-        # --- FIX: Use -Credential parameter instead of -UserName/-Password ---
-        Connect-NTNXCluster -Server $ip -Credential $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
-        
+        Connect-NTNXCluster -Server $ip -UserName $user -Password $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
         $vm = Get-NTNXVM | Where-Object { $_.vmName -eq $vmName }
         
         if ($null -eq $vm) { 
@@ -68,8 +68,7 @@ for ($i = 1; $i -le 3; $i++) {
     $v = $data.$("v$i")
     $s = $data.$("s$i")
     if (-not [string]::IsNullOrWhiteSpace($v) -and $s -ne "None") {
-        # --- FIX: Pass the $credential object as an argument ---
-        Start-Job -ScriptBlock $taskBlock -ArgumentList $s, $v, $data.$("a$i"), $data.$("d$i"), $credential, $logPath, $siteMap
+        Start-Job -ScriptBlock $taskBlock -ArgumentList $s, $v, $data.$("a$i"), $data.$("d$i"), $env:NUTANIX_USER, $env:NUTANIX_PASS, $logPath, $siteMap
     }
 }
 
