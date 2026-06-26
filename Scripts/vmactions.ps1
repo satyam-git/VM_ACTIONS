@@ -20,7 +20,11 @@ $taskBlock = {
     # 1. Initial Delay
     if ([int]$delay -gt 0) { Start-Sleep -Seconds ([int]$delay * 60) }
     
-    $creds = $pass | ConvertTo-SecureString -AsPlainText -Force
+    # --- FIX: Avoids the "AsPlainText" flag and "invalid encrypted string" error ---
+    $creds = New-Object System.Security.SecureString
+    foreach ($char in $pass.ToCharArray()) { $creds.AppendChar($char) }
+    $creds.MakeReadOnly()
+    
     $Status = "failed"
     try {
         Connect-NTNXCluster -Server $ip -UserName $user -Password $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
@@ -69,5 +73,3 @@ for ($i = 1; $i -le 3; $i++) {
 }
 
 Get-Job | Wait-Job | Receive-Job
-vm actions ps1.txt
-Displaying vm actions yml.txt.
