@@ -1,75 +1,40 @@
-param($JsonInputs)
-$data = $JsonInputs | ConvertFrom-Json
-$logPath = Join-Path $env:GITHUB_WORKSPACE "data\vm_execution_log.csv"
+name: Nutanix VMActions
 
-$siteMap = @{
-    "Banglore" = "192.168.136.50"
-    "Chennai"  = "10.0.0.10"
-}
+on:
+  workflow_dispatch:
+    inputs:
+      s1: { description: '1: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
+      v1: { description: '1: VM Name', required: false, type: string }
+      a1: { description: '1: Action', required: false, type: choice, options: [start, stop, restart] }
+      d1: { description: '1: Delay (min)', required: false, default: '0', type: string }
+      s2: { description: '2: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
+      v2: { description: '2: VM Name', required: false, type: string }
+      a2: { description: '2: Action', required: false, type: choice, options: [start, stop, restart] }
+      d2: { description: '2: Delay (min)', required: false, default: '0', type: string }
+      s3: { description: '3: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
+      v3: { description: '3: VM Name', required: false, type: string }
+      a3: { description: '3: Action', required: false, type: choice, options: [start, stop, restart] }
+      d3: { description: '3: Delay (min)', required: false, default: '0', type: string }
 
-if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
-if (Test-Path $logPath) { Remove-Item $logPath }
-
-$taskBlock = {
-    param($site, $vmName, $action, $delay, $user, $pass, $logPath, $siteMap)
-    $ip = $siteMap[$site]
-    if (-not $ip) { return }
-
-    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin }
-    
-    # 1. Initial Delay
-    if ([int]$delay -gt 0) { Start-Sleep -Seconds ([int]$delay * 60) }
-    
-    # --- FIX: Avoids the "AsPlainText" flag and "invalid encrypted string" error ---
-    $creds = New-Object System.Security.SecureString
-    foreach ($char in $pass.ToCharArray()) { $creds.AppendChar($char) }
-    $creds.MakeReadOnly()
-    
-    $Status = "failed"
-    try {
-        Connect-NTNXCluster -Server $ip -UserName $user -Password $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
-        $vm = Get-NTNXVM | Where-Object { $_.vmName -eq $vmName }
-        
-        if ($null -eq $vm) { 
-            $Status = "VM Not Found" 
-        } else {
-            switch ($action) {
-                "start" { 
-                    if ($vm.powerState -eq "on") { $Status = "already on-hence skipped" } 
-                    else { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ON; $Status = "successful" }
-                }
-                "stop" { 
-                    if ($vm.powerState -eq "off") { $Status = "already off-hence skipped" } 
-                    else {
-                        Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN
-                        Start-Sleep -Seconds 45
-                        if ((Get-NTNXVM -Vmid $vm.uuid).powerState -eq "on") { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN }
-                        $Status = "successful"
-                    }
-                }
-                "restart" { 
-                    if ($vm.powerState -eq "off") { $Status = "its on off, please poweron" } 
-                    else {
-                        Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_REBOOT
-                        Start-Sleep -Seconds 45
-                        if ((Get-NTNXVM -Vmid $vm.uuid).powerState -ne "on") { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_REBOOT }
-                        $Status = "successful"
-                    }
-                }
-            }
-        }
-    } catch { $Status = "failed - $($_.Exception.Message.Split(':')[0])" }
-    finally { Disconnect-NTNXCluster -Servers $ip -ErrorAction SilentlyContinue }
-    
-    "$site,$vmName,$action,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
-}
-
-for ($i = 1; $i -le 3; $i++) {
-    $v = $data.$("v$i")
-    $s = $data.$("s$i")
-    if (-not [string]::IsNullOrWhiteSpace($v) -and $s -ne "None") {
-        Start-Job -ScriptBlock $taskBlock -ArgumentList $s, $v, $data.$("a$i"), $data.$("d$i"), $env:NUTANIX_USER, $env:NUTANIX_PASS, $logPath, $siteMap
-    }
-}
-
-Get-Job | Wait-Job | Receive-Job
+jobs:
+  run-batch:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Parallel Nutanix Script
+        shell: powershell
+        env:
+          NUTANIX_USER: ${{ secrets.NUTANIX_USER }}
+          NUTANIX_PASS: ${{ secrets.NUTANIX_PASS }}
+          INPUTS_JSON: ${{ toJson(github.event.inputs) }}
+        run: |
+          & "$env:GITHUB_WORKSPACE\Scripts\vmrestart-new.ps1" -JsonInputs $env:INPUTS_JSON
+      - name: Display Execution Summary
+        shell: powershell
+        run: |
+          if (Test-Path "data/vm_execution_log.csv") {
+            Write-Host "Site Name,vmname,action,status" -ForegroundColor Cyan
+            Get-Content "data/vm_execution_log.csv"
+          }
+vm actions yml.txt
+Displaying vm actions yml.txt.
