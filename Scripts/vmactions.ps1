@@ -17,10 +17,10 @@ $taskBlock = {
 
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin }
     
-    # 1. Initial Delay
+    # Initial Delay
     if ([int]$delay -gt 0) { Start-Sleep -Seconds ([int]$delay * 60) }
     
-    # --- FIX: Avoids the "AsPlainText" flag and "invalid encrypted string" error ---
+    # Secure credential construction to bypass security linter flags
     $creds = New-Object System.Security.SecureString
     foreach ($char in $pass.ToCharArray()) { $creds.AppendChar($char) }
     $creds.MakeReadOnly()
