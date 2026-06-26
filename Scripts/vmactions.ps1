@@ -24,19 +24,13 @@ $taskBlock = {
     
     # Split input strings into arrays
     $vmArray = $vmNames.Split(',').Trim()
-    $delayInput = $delays.Split(',').Trim()
+    $delayArray = if ($delays) { $delays.Split(',').Trim() } else { @() }
     
     for ($i = 0; $i -lt $vmArray.Count; $i++) {
         $vmName = $vmArray[$i]
+        $vmDelay = if ($i -lt $delayArray.Count) { [int]$delayArray[$i] } else { 0 }
         
-        # Delay Logic: ఒకే డిలే ఇస్తే అందరికీ, లేదంటే ఇండివిడ్యువల్ గా
-        if ($delayInput.Count -eq 1 -and -not [string]::IsNullOrWhiteSpace($delayInput[0])) {
-            $vmDelay = [int]$delayInput[0]
-        } else {
-            $vmDelay = if ($i -lt $delayInput.Count) { [int]$delayInput[$i] } else { 0 }
-        }
-        
-        # Apply delay
+        # Apply delay for specific VM
         if ($vmDelay -gt 0) { Start-Sleep -Seconds ($vmDelay * 60) }
         
         $Status = "failed"
