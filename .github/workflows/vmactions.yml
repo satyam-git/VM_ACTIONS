@@ -1,4 +1,4 @@
-name: Nutanix VM Actions
+name: Nutanix VMActions
 
 on:
   workflow_dispatch:
