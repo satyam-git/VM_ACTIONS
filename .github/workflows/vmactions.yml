@@ -6,7 +6,7 @@ on:
       s1: { description: '1: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
       v1: { description: '1: VM Names (comma separated)', required: false, type: string }
       a1: { description: '1: Action', required: false, type: choice, options: [start, stop, restart] }
-      d1: { description: '1: Delay (min) (single or comma separated)', required: false, default: '0', type: string }
+      d1: { description: '1: Delay (min)', required: false, default: '0', type: string }
       s2: { description: '2: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
       v2: { description: '2: VM Names', required: false, type: string }
       a2: { description: '2: Action', required: false, type: choice, options: [start, stop, restart] }
@@ -30,14 +30,14 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE\vmactions.ps1" -JsonInputs $env:INPUTS_JSON
       
-      - name: Display Summary
+      - name: Display Execution Summary
         shell: powershell
         run: |
           if (Test-Path "data/vm_execution_log.csv") {
-            "### Execution Summary" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-            "| Site | VM | Action | Status |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-            "| :--- | :--- | :--- | :--- |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            "### Execution Summary" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            "| Site | VM | Action | Status |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            "| :--- | :--- | :--- | :--- |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             Import-Csv "data/vm_execution_log.csv" -Header "Site", "VM", "Action", "Status" | ForEach-Object {
-              "| $($_.Site) | $($_.VM) | $($_.Action) | $($_.Status) |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+              "| $($_.Site) | $($_.VM) | $($_.Action) | $($_.Status) |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             }
           }
