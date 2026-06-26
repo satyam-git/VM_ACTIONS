@@ -21,7 +21,6 @@ jobs:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-      
       - name: Run Parallel Nutanix Script
         shell: powershell
         env:
@@ -30,15 +29,10 @@ jobs:
           INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
           & "$env:GITHUB_WORKSPACE\Scripts\vmactions.ps1" -JsonInputs $env:INPUTS_JSON
-      
       - name: Display Execution Summary
         shell: powershell
         run: |
           if (Test-Path "data/vm_execution_log.csv") {
-            "### Execution Summary" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            "| Site Name | VM Name | Action | Status |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            "| :--- | :--- | :--- | :--- |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            Import-Csv "data/vm_execution_log.csv" -Header "Site", "VM", "Action", "Status" | ForEach-Object {
-              "| $($_.Site) | $($_.VM) | $($_.Action) | $($_.Status) |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            }
+            Write-Host "Site Name,vmname,action,status" -ForegroundColor Cyan
+            Get-Content "data/vm_execution_log.csv"
           }
