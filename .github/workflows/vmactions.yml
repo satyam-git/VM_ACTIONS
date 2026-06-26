@@ -1,19 +1,18 @@
-
 name: Nutanix VMActions
 
 on:
   workflow_dispatch:
     inputs:
       s1: { description: '1: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
-      v1: { description: '1: VM Names', required: false, type: string }
+      v1: { description: '1: VM Name', required: false, type: string }
       a1: { description: '1: Action', required: false, type: choice, options: [start, stop, restart] }
       d1: { description: '1: Delay (min)', required: false, default: '0', type: string }
       s2: { description: '2: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
-      v2: { description: '2: VM Names', required: false, type: string }
+      v2: { description: '2: VM Name', required: false, type: string }
       a2: { description: '2: Action', required: false, type: choice, options: [start, stop, restart] }
       d2: { description: '2: Delay (min)', required: false, default: '0', type: string }
       s3: { description: '3: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
-      v3: { description: '3: VM Names', required: false, type: string }
+      v3: { description: '3: VM Name', required: false, type: string }
       a3: { description: '3: Action', required: false, type: choice, options: [start, stop, restart] }
       d3: { description: '3: Delay (min)', required: false, default: '0', type: string }
 
@@ -22,7 +21,7 @@ jobs:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-      - name: Run Nutanix Script
+      - name: Run Parallel Nutanix Script
         shell: powershell
         env:
           NUTANIX_USER: ${{ secrets.NUTANIX_USER }}
@@ -31,13 +30,14 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE\Scripts\vmactions.ps1" -JsonInputs $env:INPUTS_JSON
       
-      - name: Display Summary
+      - name: Display Execution Summary
         shell: powershell
         run: |
           if (Test-Path "data/vm_execution_log.csv") {
             "### Execution Summary" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            "| Site | VM | Action | Status |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            "| Site Name | vmname | action | status |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             "| :--- | :--- | :--- | :--- |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            
             Import-Csv "data/vm_execution_log.csv" -Header "Site", "VM", "Action", "Status" | ForEach-Object {
               "| $($_.Site) | $($_.VM) | $($_.Action) | $($_.Status) |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             }
