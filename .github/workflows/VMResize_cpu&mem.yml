@@ -1,49 +1,35 @@
-name: Nutanix VMResize_cpu&mem
+name: Nutanix Unified VMResize
 
 on:
   workflow_dispatch:
     inputs:
-      # Group 1
-      vmname1: { description: '1: VM Name (comma separated)', required: false, default: '' }
-      pE_IP1: { description: '1: Cluster IP', required: false, default: '' }
-      CPU_size1: { description: '1: CPU Cores', required: false, default: '' }
-      mem_size1: { description: '1: Memory (GB)', required: false, default: '' }
-      delay_mins1: { description: '1: Delay (min) (comma for multiple)', required: false, default: '0' }
-      # Group 2
-      vmname2: { description: '2: VM Name (comma separated)', required: false, default: '' }
-      pE_IP2: { description: '2: Cluster IP', required: false, default: '' }
-      CPU_size2: { description: '2: CPU Cores', required: false, default: '' }
-      mem_size2: { description: '2: Memory (GB)', required: false, default: '' }
-      delay_mins2: { description: '2: Delay (min) (comma for multiple)', required: false, default: '0' }
-      # Group 3
-      vmname3: { description: '3: VM Name (comma separated)', required: false, default: '' }
-      pE_IP3: { description: '3: Cluster IP', required: false, default: '' }
-      CPU_size3: { description: '3: CPU Cores', required: false, default: '' }
-      mem_size3: { description: '3: Memory (GB)', required: false, default: '' }
-      delay_mins3: { description: '3: Delay (min) (comma for multiple)', required: false, default: '0' }
+      s1: { description: '1: Site', required: false, type: choice, options: [None, Banglore, Chennai] }
+      v1: { description: '1: VM Name(s)', required: false }
+      cpu1: { description: '1: CPU', required: false, default: '2' }
+      mem1: { description: '1: RAM(GB)', required: false, default: '4' }
+      d1: { description: '1: Delay(m)', required: false, default: '0' }
+      s2: { description: '2: Site', required: false, type: choice, options: [None, Banglore, Chennai] }
+      v2: { description: '2: VM Name(s)', required: false }
+      cpu2: { description: '2: CPU', required: false, default: '2' }
+      mem2: { description: '2: RAM(GB)', required: false, default: '4' }
+      d2: { description: '2: Delay(m)', required: false, default: '0' }
+      s3: { description: '3: Site', required: false, type: choice, options: [None, Banglore, Chennai] }
+      v3: { description: '3: VM Name(s)', required: false }
+      cpu3: { description: '3: CPU', required: false, default: '2' }
+      mem3: { description: '3: RAM(GB)', required: false, default: '4' }
+      d3: { description: '3: Delay(m)', required: false, default: '0' }
+      # ... s2, v2, cpu2, mem2, d2 మరియు s3, v3, cpu3, mem3, d3 సెట్లు యాడ్ చేసుకోండి
 
 jobs:
-  run-compute-resize:
+  run-resize:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-      - name: Run Parallel Compute Resize
+      - name: Run Resize
         shell: powershell
         env:
           PE_USER: ${{ secrets.PE_Username }}
           PE_PASS: ${{ secrets.PE_Password }}
           INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
-          & "$env:GITHUB_WORKSPACE\Scripts\VMResize_cpu&mem.ps1" -JsonInputs $env:INPUTS_JSON
-      - name: Display Execution Summary
-        shell: powershell
-        run: |
-          $logPath = "data/vm_resize_log.csv"
-          if (Test-Path $logPath) {
-            "### Resize Execution Summary" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            "| Cluster IP | VM Name | CPU (new) | Memory (GB) | Status |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            "| :--- | :--- | :--- | :--- | :--- |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            Import-Csv $logPath -Header "ClusterIP","VM","CPU","Mem","Status" | ForEach-Object {
-              "| $($_.ClusterIP) | $($_.VM) | $($_.CPU) | $($_.Mem) | $($_.Status) |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            }
-          }
+          & "$env:GITHUB_WORKSPACE\VMResize_Unified.ps1" -JsonInputs $env:INPUTS_JSON
