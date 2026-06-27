@@ -28,7 +28,7 @@ jobs:
           NUTANIX_PASS: ${{ secrets.NUTANIX_PASS }}
           INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
-          & "$env:GITHUB_WORKSPACE\vmactions.ps1" -JsonInputs $env:INPUTS_JSON
+          & "$env:GITHUB_WORKSPACE\Scripts\vmactions.ps1" -JsonInputs $env:INPUTS_JSON
       
       - name: Display Summary
         shell: powershell
