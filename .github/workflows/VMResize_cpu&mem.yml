@@ -1,53 +1,37 @@
-name: Nutanix VMResize_cpu&mem
+name: Nutanix VMResize_CPU&Mem
 
 on:
   workflow_dispatch:
     inputs:
-      vmname:
-        description: 'VM Name(s) – comma-separated for multiple VMs'
-        required: true
-        type: string
-      pE_IP:
-        description: 'Cluster IP(s) – comma-separated (single value applies to all)'
-        required: true
-        type: string
-      CPU_size:
-        description: 'CPU Cores per VM – comma-separated (0 means keep current, single value applies to all)'
-        required: true
-        type: string
-      mem_size:
-        description: 'Memory (GB) per VM – comma-separated (0 means keep current, single value applies to all)'
-        required: true
-        type: string
-      delay_mins:
-        description: 'Delay (min) per VM – comma-separated (single value applies to all)'
-        required: false
-        default: '0'
-        type: string
+      s1: { description: '1: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
+      v1: { description: '1: VM Name', required: false, type: string }
+      a1: { description: '1: Action', required: false, type: choice, options: [start, stop, restart, resize] }
+      d1: { description: '1: Delay (min)', required: false, default: '0', type: string }
+      cpu1: { description: '1: CPU Cores (for resize)', required: false, default: '0' }
+      mem1: { description: '1: RAM GB (for resize)', required: false, default: '0' }
+      s2: { description: '2: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
+      v2: { description: '2: VM Name', required: false, type: string }
+      a2: { description: '2: Action', required: false, type: choice, options: [start, stop, restart, resize] }
+      d2: { description: '2: Delay (min)', required: false, default: '0', type: string }
+      cpu2: { description: '2: CPU Cores (for resize)', required: false, default: '0' }
+      mem2: { description: '2: RAM GB (for resize)', required: false, default: '0' }
+      s3: { description: '3: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
+      v3: { description: '3: VM Name', required: false, type: string }
+      a3: { description: '3: Action', required: false, type: choice, options: [start, stop, restart, resize] }
+      d3: { description: '3: Delay (min)', required: false, default: '0', type: string }
+      cpu3: { description: '3: CPU Cores (for resize)', required: false, default: '0' }
+      mem3: { description: '3: RAM GB (for resize)', required: false, default: '0' }
 
 jobs:
-  run-compute-resize:
+  run-batch:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-      - name: Run Parallel Compute Resize
+      - name: Run Unified Nutanix Script
         shell: powershell
         env:
-          PE_USER: ${{ secrets.PE_Username }}
-          PE_PASS: ${{ secrets.PE_Password }}
+          NUTANIX_USER: ${{ secrets.NUTANIX_USER }}
+          NUTANIX_PASS: ${{ secrets.NUTANIX_PASS }}
           INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
-          & "$env:GITHUB_WORKSPACE\Scripts\VMResize_cpu&mem.ps1" -JsonInputs $env:INPUTS_JSON
-
-      - name: Display Execution Summary
-        shell: powershell
-        run: |
-          if (Test-Path "data/vm_resize_log.csv") {
-            "### Resize Execution Summary" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            "| VM Name | Cluster IP | CPU Final | Memory (GB) | Delay (min) | Status |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            "| :--- | :--- | :--- | :--- | :--- | :--- |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-
-            Import-Csv "data/vm_resize_log.csv" -Header "VMName","ClusterIP","FinalCPU","FinalMemGB","Delay","Status" | ForEach-Object {
-              "| $($_.VMName) | $($_.ClusterIP) | $($_.FinalCPU) | $($_.FinalMemGB) | $($_.Delay) | $($_.Status) |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            }
-          }
+          & "$env:GITHUB_WORKSPACE\vmactions_unified.ps1" -JsonInputs $env:INPUTS_JSON
