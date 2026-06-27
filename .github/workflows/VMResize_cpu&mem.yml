@@ -1,4 +1,4 @@
-name: Nutanix Unified VMResize
+name: Nutanix VMResize_cpu&mem
 
 on:
   workflow_dispatch:
@@ -32,4 +32,4 @@ jobs:
           PE_PASS: ${{ secrets.PE_Password }}
           INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
-          & "$env:GITHUB_WORKSPACE\VMResize_Unified.ps1" -JsonInputs $env:INPUTS_JSON
+          & "$env:GITHUB_WORKSPACE\Scripts\VMResize_cpu&mem.ps1" -JsonInputs $env:INPUTS_JSON
