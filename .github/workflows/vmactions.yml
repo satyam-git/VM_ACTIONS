@@ -1,44 +1,49 @@
-name: Nutanix VMActions
+name: Nutanix VMResize_cpu&mem
 
 on:
   workflow_dispatch:
     inputs:
       s1: { description: '1: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
-      v1: { description: '1: VM Name', required: false, type: string }
-      a1: { description: '1: Action', required: false, type: choice, options: [start, stop, restart] }
-      d1: { description: '1: Delay (min)', required: false, default: '0', type: string }
+      v1: { description: '1: VM Name(s) (comma separated)', required: false, type: string }
+      c1: { description: '1: CPU Cores (0 = no change)', required: false, default: '0', type: string }
+      m1: { description: '1: Memory GB (0 = no change)', required: false, default: '0', type: string }
+      d1: { description: '1: Delay (min, comma‑separated)', required: false, default: '0', type: string }
+
       s2: { description: '2: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
-      v2: { description: '2: VM Name', required: false, type: string }
-      a2: { description: '2: Action', required: false, type: choice, options: [start, stop, restart] }
-      d2: { description: '2: Delay (min)', required: false, default: '0', type: string }
+      v2: { description: '2: VM Name(s) (comma separated)', required: false, type: string }
+      c2: { description: '2: CPU Cores (0 = no change)', required: false, default: '0', type: string }
+      m2: { description: '2: Memory GB (0 = no change)', required: false, default: '0', type: string }
+      d2: { description: '2: Delay (min, comma‑separated)', required: false, default: '0', type: string }
+
       s3: { description: '3: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
-      v3: { description: '3: VM Name', required: false, type: string }
-      a3: { description: '3: Action', required: false, type: choice, options: [start, stop, restart] }
-      d3: { description: '3: Delay (min)', required: false, default: '0', type: string }
+      v3: { description: '3: VM Name(s) (comma separated)', required: false, type: string }
+      c3: { description: '3: CPU Cores (0 = no change)', required: false, default: '0', type: string }
+      m3: { description: '3: Memory GB (0 = no change)', required: false, default: '0', type: string }
+      d3: { description: '3: Delay (min, comma‑separated)', required: false, default: '0', type: string }
 
 jobs:
-  run-batch:
+  run-resize-batch:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-      - name: Run Parallel Nutanix Script
+      - name: Run Parallel Nutanix Resize
         shell: powershell
         env:
-          NUTANIX_USER: ${{ secrets.NUTANIX_USER }}
-          NUTANIX_PASS: ${{ secrets.NUTANIX_PASS }}
+          PE_USER: ${{ secrets.PE_Username }}
+          PE_PASS: ${{ secrets.PE_Password }}
           INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
-          & "$env:GITHUB_WORKSPACE\Scripts\vmactions.ps1" -JsonInputs $env:INPUTS_JSON
-      
-      - name: Display Execution Summary
+          & "$env:GITHUB_WORKSPACE\Scripts\VMResize_cpu&mem.ps1" -JsonInputs $env:INPUTS_JSON
+
+      - name: Display Resize Summary
         shell: powershell
         run: |
-          if (Test-Path "data/vm_execution_log.csv") {
-            "### Execution Summary" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            "| Site Name | vmname | action | status |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            "| :--- | :--- | :--- | :--- |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            
-            Import-Csv "data/vm_execution_log.csv" -Header "Site", "VM", "Action", "Status" | ForEach-Object {
-              "| $($_.Site) | $($_.VM) | $($_.Action) | $($_.Status) |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          $log = "data/vm_resize_log.csv"
+          if (Test-Path $log) {
+            "### Resize Summary" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            "| Site | VM | Old CPU | Old Mem(GB) | New CPU | New Mem(GB) | Status |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            "| :--- | :--- | :---: | :---: | :---: | :---: | :--- |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            Import-Csv $log -Header "Site","VM","OldCPU","OldMem","NewCPU","NewMem","Status" | ForEach-Object {
+              "| $($_.Site) | $($_.VM) | $($_.OldCPU) | $($_.OldMem) | $($_.NewCPU) | $($_.NewMem) | $($_.Status) |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             }
           }
