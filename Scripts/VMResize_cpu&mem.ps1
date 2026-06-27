@@ -1,137 +1,69 @@
 param($JsonInputs)
 $data = $JsonInputs | ConvertFrom-Json
-$logPath = Join-Path $env:GITHUB_WORKSPACE "data\vm_resize_log.csv"
+$logPath = Join-Path $env:GITHUB_WORKSPACE "data\vm_execution_log.csv"
+
+# Site Map
+$siteMap = @{ "Banglore" = "192.168.136.50"; "Chennai" = "10.0.0.10" }
 
 if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
 if (Test-Path $logPath) { Remove-Item $logPath }
 
-# Helper to expand a parameter to match the number of VMs
-function Expand-Parameter {
-    param(
-        [string[]]$vmList,
-        [string]$rawValue
-    )
-    $values = $rawValue -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
-    $vmCount = $vmList.Count
+if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin }
 
-    if ($values.Count -eq 0) {
-        return $null
-    }
-    if ($values.Count -eq 1) {
-        # single value applies to all
-        $result = @()
-        for ($i = 0; $i -lt $vmCount; $i++) { $result += $values[0] }
-        return $result
-    }
-    # multiple values: map one-to-one, pad with last
-    $result = @()
-    for ($i = 0; $i -lt $vmCount; $i++) {
-        if ($i -lt $values.Count) { $result += $values[$i] }
-        else { $result += $values[-1] }
-    }
-    return $result
-}
+# Credential Construction
+$creds = New-Object System.Security.SecureString
+foreach ($char in $env:NUTANIX_PASS.ToCharArray()) { $creds.AppendChar($char) }
+$creds.MakeReadOnly()
 
-# Read and expand all parameters
-$vmNamesRaw = $data.vmname
-if ([string]::IsNullOrWhiteSpace($vmNamesRaw)) { throw "VM name(s) are required." }
-$vmList = $vmNamesRaw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
-if ($vmList.Count -eq 0) { throw "No valid VM names provided." }
+for ($i = 1; $i -le 3; $i++) {
+    $v = $data.$("v$i"); $s = $data.$("s$i"); $a = $data.$("a$i"); $d = $data.$("d$i")
+    $cpu = $data.$("cpu$i"); $mem = $data.$("mem$i")
 
-$clusterIPs = Expand-Parameter -vmList $vmList -rawValue $data.pE_IP
-$cpuSizes   = Expand-Parameter -vmList $vmList -rawValue $data.CPU_size
-$memSizes   = Expand-Parameter -vmList $vmList -rawValue $data.mem_size
-$delays     = Expand-Parameter -vmList $vmList -rawValue $data.delay_mins
+    if (-not [string]::IsNullOrWhiteSpace($v) -and $s -ne "None") {
+        $ip = $siteMap[$s]
+        $vmArray = $v.Split(',').Trim()
+        $delayArray = if ($d) { $d.Split(',').Trim() } else { @() }
 
-# Set defaults for null/empty expansions
-if ($null -eq $clusterIPs) { $clusterIPs = @("") * $vmList.Count }
-if ($null -eq $cpuSizes)   { $cpuSizes   = @("0") * $vmList.Count }
-if ($null -eq $memSizes)   { $memSizes   = @("0") * $vmList.Count }
-if ($null -eq $delays)     { $delays     = @("0") * $vmList.Count }
-
-$jobBlock = {
-    param($VMName, $ClusterIP, $CPU, $MemGB, $Delay, $User, $Pass, $LogPath)
-
-    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
-        Add-PSSnapin NutanixCmdletsPSSnapin | Out-Null
-    }
-
-    $Status = "failed"
-    try {
-        if ([int]$Delay -gt 0) {
-            Start-Sleep -Seconds ([int]$Delay * 60)
-        }
-
-        $securePass = $Pass | ConvertTo-SecureString -AsPlainText -Force
-        Connect-NTNXCluster -Server $ClusterIP -UserName $User -Password $securePass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
-
-        $VM = Get-NTNXVM | Where-Object { $_.vmName -eq $VMName }
-        if (-not $VM) {
-            $Status = "VM not found"
-            throw "VM $VMName not found on cluster $ClusterIP."
-        }
-
-        $CurrentCPU = [int]$VM.numVcpus
-        $CurrentMemGB = [int]($VM.memoryMb / 1024)
-
-        $FinalCPU = if ([int]$CPU -gt 0) { [int]$CPU } else { $CurrentCPU }
-        $FinalMemGB = if ([int]$MemGB -gt 0) { [int]$MemGB } else { $CurrentMemGB }
-        if ($FinalMemGB -lt 1) { $FinalMemGB = 1 }
-
-        if ($FinalCPU -eq $CurrentCPU -and $FinalMemGB -eq $CurrentMemGB) {
-            $Status = "skipped (values unchanged)"
-            Write-Host "VM $VMName : Current and requested values are identical. Skipping resize."
-            Disconnect-NTNXCluster -Servers $ClusterIP -ErrorAction SilentlyContinue
-            "$VMName,$ClusterIP,$FinalCPU,$FinalMemGB,$Delay,$Status" | Out-File -FilePath $LogPath -Append -Encoding utf8
-            return
-        }
-
-        # Two‑strike shutdown
-        function Invoke-TwoStrikeShutdown {
-            param($VMObj)
-            Write-Host "VM $VMName : Attempt 1 - ACPI shutdown..."
-            Set-NTNXVMPowerState -Vmid $VMObj.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
-            Start-Sleep -Seconds 40
-            $CheckVM = Get-NTNXVM -Vmid $VMObj.uuid
-            if ($CheckVM.powerState -eq "ON") {
-                Write-Host "VM $VMName : Still ON. Attempt 2 - ACPI shutdown again..."
-                Set-NTNXVMPowerState -Vmid $VMObj.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
-                Start-Sleep -Seconds 20
+        try {
+            Connect-NTNXCluster -Server $ip -UserName $env:NUTANIX_USER -Password $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
+            
+            for ($j = 0; $j -lt $vmArray.Count; $j++) {
+                $vmName = $vmArray[$j]
+                $vmDelay = if ($delayArray.Count -eq 1) { [int]$delayArray[0] } elseif ($j -lt $delayArray.Count) { [int]$delayArray[$j] } else { 0 }
+                if ($vmDelay -gt 0) { Start-Sleep -Seconds ($vmDelay * 60) }
+                
+                $vm = Get-NTNXVM | Where-Object { $_.vmName -eq $vmName } | Select-Object -First 1
+                $Status = "failed"
+                
+                if ($null -eq $vm) { $Status = "VM Not Found" }
+                else {
+                    switch ($a) {
+                        "start" { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ON; $Status = "Started" }
+                        "stop" { 
+                            Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN
+                            Start-Sleep -Seconds 45
+                            if ((Get-NTNXVM -Vmid $vm.uuid).powerState -eq "on") { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN }
+                            $Status = "Stopped"
+                        }
+                        "restart" { 
+                            Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_REBOOT
+                            Start-Sleep -Seconds 45
+                            $Status = "Restarted"
+                        }
+                        "resize" {
+                            # Two-strike shutdown
+                            Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN
+                            Start-Sleep -Seconds 45
+                            # Apply Resize
+                            Set-NTNXVirtualMachine -Vmid $vm.uuid -NumVcpus ([int]$cpu) -MemoryMb ([int]$mem * 1024) -ErrorAction Stop
+                            Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ON
+                            $Status = "Resized to ${cpu}C/${mem}G"
+                        }
+                    }
+                }
+                "$s,$vmName,$a,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
             }
-        }
-        Invoke-TwoStrikeShutdown -VMObj $VM
-
-        Write-Host "VM $VMName : Applying $FinalCPU vCPU, $FinalMemGB GB RAM."
-        Set-NTNXVirtualMachine -Vmid $VM.uuid -NumVcpus $FinalCPU -MemoryMb ($FinalMemGB * 1024) -ErrorAction Stop | Out-Null
-        Set-NTNXVMPowerState -Vmid $VM.uuid -Transition ON -ErrorAction Stop | Out-Null
-
-        $Status = "successful"
-        Disconnect-NTNXCluster -Servers $ClusterIP -ErrorAction SilentlyContinue
+        } catch { "$s,$vmName,$a,Error: $($_.Exception.Message.Split(':')[0])" | Out-File -FilePath $logPath -Append -Encoding utf8 }
+        finally { Disconnect-NTNXCluster -Servers $ip -ErrorAction SilentlyContinue }
     }
-    catch {
-        $Status = "failed - $($_.Exception.Message.Split(':')[0])"
-    }
-    finally {
-        Disconnect-NTNXCluster -Servers $ClusterIP -ErrorAction SilentlyContinue
-    }
-
-    "$VMName,$ClusterIP,$FinalCPU,$FinalMemGB,$Delay,$Status" | Out-File -FilePath $LogPath -Append -Encoding utf8
 }
-
-# Launch a background job for each VM
-for ($i = 0; $i -lt $vmList.Count; $i++) {
-    $vm = $vmList[$i]
-    $ip = $clusterIPs[$i]
-    $cpu = $cpuSizes[$i]
-    $mem = $memSizes[$i]
-    $delay = $delays[$i]
-
-    if ([string]::IsNullOrWhiteSpace($ip)) {
-        Write-Warning "Skipping VM '$vm' - no cluster IP provided."
-        continue
-    }
-
-    Start-Job -ScriptBlock $jobBlock -ArgumentList $vm, $ip, $cpu, $mem, $delay, $env:PE_USER, $env:PE_PASS, $logPath
-}
-
-Get-Job | Wait-Job | Receive-Job
