@@ -17,10 +17,9 @@ $taskBlock = {
 
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin }
     
-    # Initial Delay – now $delay is guaranteed to be an integer
+    
     if ([int]$delay -gt 0) { Start-Sleep -Seconds ([int]$delay * 60) }
     
-    # Secure credential construction
     $creds = New-Object System.Security.SecureString
     foreach ($char in $pass.ToCharArray()) { $creds.AppendChar($char) }
     $creds.MakeReadOnly()
@@ -64,25 +63,25 @@ $taskBlock = {
     "$site,$vmName,$action,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
 }
 
-# Helper: returns a flat array of delays (integers) matching the number of VMs
+
 function Get-DelaysForVMs {
     param(
         [string[]]$vmList,
         [string]$delayInput
     )
-    # Parse comma-separated delays, trim, ignore empty, convert to int
+    
     $delays = $delayInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | ForEach-Object { [int]$_ }
     $vmCount = $vmList.Count
 
     if ($delays.Count -eq 0) {
-        # No delay provided → all VMs get 0
+        
         return @(0) * $vmCount
     }
     if ($delays.Count -eq 1) {
-        # Single delay → applied to all VMs
+        
         return @($delays[0]) * $vmCount
     }
-    # Multiple delays: map one‑to‑one, pad with the last delay
+
     $result = @()
     for ($i = 0; $i -lt $vmCount; $i++) {
         if ($i -lt $delays.Count) {
@@ -103,7 +102,7 @@ for ($i = 1; $i -le 3; $i++) {
     $vmList = $vmNamesRaw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
 
     $action = $data.$("a$i")
-    if ([string]::IsNullOrWhiteSpace($action)) { $action = "start" }  # default
+    if ([string]::IsNullOrWhiteSpace($action)) { $action = "start" }  
 
     $delayInput = $data.$("d$i")
     if ([string]::IsNullOrWhiteSpace($delayInput)) { $delayInput = "0" }
