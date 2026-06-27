@@ -4,33 +4,27 @@ on:
   workflow_dispatch:
     inputs:
       vmname:
-        description: 'VM Name(s) – comma separated (e.g., VM01,VM02,VM03)'
+        description: 'VM Name(s) - comma separated (e.g., VM01,VM02,VM03)'
         required: true
-        type: string
       pE_IP:
         description: 'Cluster IP (single IP for all VMs)'
         required: true
-        type: string
       CPU_size:
-        description: 'CPU Cores per VM – comma separated, or a single value for all (0 = keep current)'
+        description: 'CPU Cores per VM (comma separated, or single value applied to all). 0 = keep current'
         required: true
-        type: string
       mem_size:
-        description: 'Memory (GB) per VM – comma separated, or a single value for all (0 = keep current)'
+        description: 'Memory (GB) per VM (comma separated, or single value applied to all). 0 = keep current'
         required: true
-        type: string
       delay_mins:
-        description: 'Delay (min) per VM – comma separated, or a single value for all (0 = no delay)'
+        description: 'Delay (min) per VM (comma separated, or single value applied to all). 0 = no delay'
         required: false
         default: '0'
-        type: string
 
 jobs:
   run-compute-resize:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-
       - name: Run Parallel VM Resize
         shell: powershell
         env:
@@ -39,7 +33,7 @@ jobs:
           INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
           & "$env:GITHUB_WORKSPACE\Scripts\VMResize_cpu&mem.ps1" -JsonInputs $env:INPUTS_JSON
-
+      
       - name: Display Execution Summary
         shell: powershell
         run: |
@@ -47,7 +41,7 @@ jobs:
             "### Resize Summary" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             "| VM Name | Cluster IP | CPU (new) | Memory (GB) | Status |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             "| :--- | :--- | :--- | :--- | :--- |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-
+            
             Import-Csv "data/vm_resize_log.csv" -Header "VM","Cluster","CPU","Memory","Status" | ForEach-Object {
               "| $($_.VM) | $($_.Cluster) | $($_.CPU) | $($_.Memory) | $($_.Status) |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             }
