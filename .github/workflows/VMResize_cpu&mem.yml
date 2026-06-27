@@ -3,29 +3,30 @@ name: Nutanix VMResize_cpu&mem
 on:
   workflow_dispatch:
     inputs:
-      s1: { description: '1: Site', required: false, type: choice, options: [None, Banglore, Chennai] }
-      v1: { description: '1: VM Name(s)', required: false }
-      cpu1: { description: '1: CPU', required: false, default: '2' }
-      mem1: { description: '1: RAM(GB)', required: false, default: '4' }
-      d1: { description: '1: Delay(m)', required: false, default: '0' }
-      s2: { description: '2: Site', required: false, type: choice, options: [None, Banglore, Chennai] }
-      v2: { description: '2: VM Name(s)', required: false }
-      cpu2: { description: '2: CPU', required: false, default: '2' }
-      mem2: { description: '2: RAM(GB)', required: false, default: '4' }
-      d2: { description: '2: Delay(m)', required: false, default: '0' }
-      s3: { description: '3: Site', required: false, type: choice, options: [None, Banglore, Chennai] }
-      v3: { description: '3: VM Name(s)', required: false }
-      cpu3: { description: '3: CPU', required: false, default: '2' }
-      mem3: { description: '3: RAM(GB)', required: false, default: '4' }
-      d3: { description: '3: Delay(m)', required: false, default: '0' }
-      # ... s2, v2, cpu2, mem2, d2 మరియు s3, v3, cpu3, mem3, d3 సెట్లు యాడ్ చేసుకోండి
+      s1: { description: '1: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
+      v1: { description: '1: VM Name(s) (comma separated)', required: false, type: string }
+      c1: { description: '1: CPU Cores (0 = no change)', required: false, default: '0', type: string }
+      m1: { description: '1: Memory GB (0 = no change)', required: false, default: '0', type: string }
+      d1: { description: '1: Delay (min, comma‑separated)', required: false, default: '0', type: string }
+
+      s2: { description: '2: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
+      v2: { description: '2: VM Name(s) (comma separated)', required: false, type: string }
+      c2: { description: '2: CPU Cores (0 = no change)', required: false, default: '0', type: string }
+      m2: { description: '2: Memory GB (0 = no change)', required: false, default: '0', type: string }
+      d2: { description: '2: Delay (min, comma‑separated)', required: false, default: '0', type: string }
+
+      s3: { description: '3: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
+      v3: { description: '3: VM Name(s) (comma separated)', required: false, type: string }
+      c3: { description: '3: CPU Cores (0 = no change)', required: false, default: '0', type: string }
+      m3: { description: '3: Memory GB (0 = no change)', required: false, default: '0', type: string }
+      d3: { description: '3: Delay (min, comma‑separated)', required: false, default: '0', type: string }
 
 jobs:
-  run-resize:
+  run-resize-batch:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-      - name: Run Resize
+      - name: Run Parallel Nutanix Resize
         shell: powershell
         env:
           PE_USER: ${{ secrets.PE_Username }}
@@ -33,3 +34,16 @@ jobs:
           INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
           & "$env:GITHUB_WORKSPACE\Scripts\VMResize_cpu&mem.ps1" -JsonInputs $env:INPUTS_JSON
+
+      - name: Display Resize Summary
+        shell: powershell
+        run: |
+          $log = "data/vm_resize_log.csv"
+          if (Test-Path $log) {
+            "### Resize Summary" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            "| Site | VM | Old CPU | Old Mem(GB) | New CPU | New Mem(GB) | Status |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            "| :--- | :--- | :---: | :---: | :---: | :---: | :--- |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            Import-Csv $log -Header "Site","VM","OldCPU","OldMem","NewCPU","NewMem","Status" | ForEach-Object {
+              "| $($_.Site) | $($_.VM) | $($_.OldCPU) | $($_.OldMem) | $($_.NewCPU) | $($_.NewMem) | $($_.Status) |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            }
+          }
