@@ -17,7 +17,7 @@ $taskBlock = {
 
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin }
     
-    # Initial Delay
+    # Initial Delay – now $delay is guaranteed to be an integer
     if ([int]$delay -gt 0) { Start-Sleep -Seconds ([int]$delay * 60) }
     
     # Secure credential construction
@@ -64,29 +64,31 @@ $taskBlock = {
     "$site,$vmName,$action,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
 }
 
-# Helper to produce an array of delays matching the number of VMs
+# Helper: returns a flat array of delays (integers) matching the number of VMs
 function Get-DelaysForVMs {
     param(
         [string[]]$vmList,
         [string]$delayInput
     )
+    # Parse comma-separated delays, trim, ignore empty, convert to int
     $delays = $delayInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | ForEach-Object { [int]$_ }
     $vmCount = $vmList.Count
+
     if ($delays.Count -eq 0) {
-        # fallback to 0 if no delay provided
-        return ,@(0) * $vmCount
+        # No delay provided → all VMs get 0
+        return @(0) * $vmCount
     }
     if ($delays.Count -eq 1) {
-        # single delay applies to all VMs
-        return ,@($delays[0]) * $vmCount
+        # Single delay → applied to all VMs
+        return @($delays[0]) * $vmCount
     }
-    # multiple delays: map one-to-one, pad with last delay if fewer delays than VMs
+    # Multiple delays: map one‑to‑one, pad with the last delay
     $result = @()
     for ($i = 0; $i -lt $vmCount; $i++) {
         if ($i -lt $delays.Count) {
             $result += $delays[$i]
         } else {
-            $result += $delays[-1]  # repeat last delay
+            $result += $delays[-1]
         }
     }
     return $result
@@ -101,7 +103,7 @@ for ($i = 1; $i -le 3; $i++) {
     $vmList = $vmNamesRaw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
 
     $action = $data.$("a$i")
-    if ([string]::IsNullOrWhiteSpace($action)) { $action = "start" }  # default if missing
+    if ([string]::IsNullOrWhiteSpace($action)) { $action = "start" }  # default
 
     $delayInput = $data.$("d$i")
     if ([string]::IsNullOrWhiteSpace($delayInput)) { $delayInput = "0" }
