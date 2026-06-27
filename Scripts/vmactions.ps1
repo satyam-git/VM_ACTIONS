@@ -10,66 +10,66 @@ $siteMap = @{
 if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
 if (Test-Path $logPath) { Remove-Item $logPath }
 
-$taskBlock = {
-    param($site, $vmName, $action, $delay, $user, $pass, $logPath, $siteMap)
-    $ip = $siteMap[$site]
-    if (-not $ip) { return }
+if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin }
 
-    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin }
-    
-    # Initial Delay
-    if ([int]$delay -gt 0) { Start-Sleep -Seconds ([int]$delay * 60) }
-    
-    # Secure credential construction to bypass security linter flags
-    $creds = New-Object System.Security.SecureString
-    foreach ($char in $pass.ToCharArray()) { $creds.AppendChar($char) }
-    $creds.MakeReadOnly()
-    
-    $Status = "failed"
-    try {
-        Connect-NTNXCluster -Server $ip -UserName $user -Password $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
-        $vm = Get-NTNXVM | Where-Object { $_.vmName -eq $vmName }
-        
-        if ($null -eq $vm) { 
-            $Status = "VM Not Found" 
-        } else {
-            switch ($action) {
-                "start" { 
-                    if ($vm.powerState -eq "on") { $Status = "already on-hence skipped" } 
-                    else { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ON; $Status = "successful" }
-                }
-                "stop" { 
-                    if ($vm.powerState -eq "off") { $Status = "already off-hence skipped" } 
-                    else {
-                        Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN
-                        Start-Sleep -Seconds 45
-                        if ((Get-NTNXVM -Vmid $vm.uuid).powerState -eq "on") { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN }
-                        $Status = "successful"
-                    }
-                }
-                "restart" { 
-                    if ($vm.powerState -eq "off") { $Status = "its on off, please poweron" } 
-                    else {
-                        Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_REBOOT
-                        Start-Sleep -Seconds 45
-                        if ((Get-NTNXVM -Vmid $vm.uuid).powerState -ne "on") { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_REBOOT }
-                        $Status = "successful"
-                    }
-                }
-            }
-        }
-    } catch { $Status = "failed - $($_.Exception.Message.Split(':')[0])" }
-    finally { Disconnect-NTNXCluster -Servers $ip -ErrorAction SilentlyContinue }
-    
-    "$site,$vmName,$action,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
-}
+# Secure credential construction
+$creds = New-Object System.Security.SecureString
+foreach ($char in $env:NUTANIX_PASS.ToCharArray()) { $creds.AppendChar($char) }
+$creds.MakeReadOnly()
 
 for ($i = 1; $i -le 3; $i++) {
     $v = $data.$("v$i")
     $s = $data.$("s$i")
+    $a = $data.$("a$i")
+    $d = $data.$("d$i")
+
     if (-not [string]::IsNullOrWhiteSpace($v) -and $s -ne "None") {
-        Start-Job -ScriptBlock $taskBlock -ArgumentList $s, $v, $data.$("a$i"), $data.$("d$i"), $env:NUTANIX_USER, $env:NUTANIX_PASS, $logPath, $siteMap
+        $ip = $siteMap[$s]
+        $vmArray = $v.Split(',').Trim()
+        $delayArray = if ($d) { $d.Split(',').Trim() } else { @() }
+
+        try {
+            Connect-NTNXCluster -Server $ip -UserName $env:NUTANIX_USER -Password $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
+            
+            for ($j = 0; $j -lt $vmArray.Count; $j++) {
+                $vmName = $vmArray[$j]
+                
+                # Independent Delay Logic
+                $vmDelay = if ($delayArray.Count -eq 1 -and -not [string]::IsNullOrWhiteSpace($delayArray[0])) { [int]$delayArray[0] } `
+                           elseif ($j -lt $delayArray.Count) { [int]$delayArray[$j] } else { 0 }
+                
+                if ($vmDelay -gt 0) { Start-Sleep -Seconds ($vmDelay * 60) }
+                
+                $vm = Get-NTNXVM | Where-Object { $_.vmName -eq $vmName } | Select-Object -First 1
+                $Status = "failed"
+                
+                if ($null -eq $vm) { $Status = "VM Not Found" }
+                else {
+                    switch ($a) {
+                        "start" { 
+                            if ($vm.powerState -eq "on") { $Status = "already on" } 
+                            else { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ON; $Status = "successful" }
+                        }
+                        "stop" { 
+                            Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN
+                            Start-Sleep -Seconds 30
+                            Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN
+                            $Status = "successful"
+                        }
+                        "restart" { 
+                            Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_REBOOT
+                            Start-Sleep -Seconds 30
+                            Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_REBOOT
+                            $Status = "successful"
+                        }
+                    }
+                }
+                "$s,$vmName,$a,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
+            }
+        } catch {
+            "$s,Error,Error,Failed" | Out-File -FilePath $logPath -Append -Encoding utf8
+        } finally {
+            Disconnect-NTNXCluster -Servers $ip -ErrorAction SilentlyContinue
+        }
     }
 }
-
-Get-Job | Wait-Job | Receive-Job
