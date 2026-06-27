@@ -18,7 +18,7 @@ $taskBlock = {
         $RequestedMemGB,
         $Delay,
         $User,
-        $Pass,          # plain-text password from environment
+        $Pass,
         $LogPath
     )
 
@@ -32,15 +32,9 @@ $taskBlock = {
         Start-Sleep -Seconds ($Delay * 60)
     }
 
-    # ---- Secure credential construction (manual) ----
-    $creds = New-Object System.Security.SecureString
-    foreach ($char in $Pass.ToCharArray()) {
-        $creds.AppendChar($char)
-    }
-    $creds.MakeReadOnly()
-
-    # Connect using the secure credential
-    Connect-NTNXCluster -Server $ClusterIP -UserName $User -Password $creds -AcceptInvalidSSLCerts | Out-Null
+    # Connect
+    $SecurePass = $Pass | ConvertTo-SecureString -AsPlainText -Force
+    Connect-NTNXCluster -Server $ClusterIP -UserName $User -Password $SecurePass -AcceptInvalidSSLCerts | Out-Null
 
     $Status = "failed"
     $FinalCPU = $null
@@ -103,7 +97,7 @@ $taskBlock = {
 }
 
 # -----------------------------------------------------------------
-# Helper: expand a comma‑separated list to an array,
+# Helper: expand a comma‑separated list to an array, 
 #         and normalise length to match VM count
 # -----------------------------------------------------------------
 function Expand-List {
@@ -112,7 +106,7 @@ function Expand-List {
         [int]$TargetCount,
         [string]$DefaultValue = "0"
     )
-    if ([string]::IsNullOrWhiteSpace($InputString)) {
+    if ([string]::IsNullOrWhiteSpace($InputString)) { 
         return @($DefaultValue) * $TargetCount
     }
     $items = $InputString -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
