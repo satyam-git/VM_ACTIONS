@@ -195,20 +195,20 @@ $MAX_DELAY_MINUTES = 60   # optional cap
 
 for ($i = 1; $i -le 3; $i++) {
     $site = $data.$("s$i")
-    if (-not $site -or $site -eq "None") { 
+    if (-not $site -or $site -eq "None") {
         Write-Host "Set $i: Site is None or empty – skipping."
-        continue 
+        continue
     }
 
     $vmNamesRaw = $data.$("v$i")
-    if ([string]::IsNullOrWhiteSpace($vmNamesRaw)) { 
+    if ([string]::IsNullOrWhiteSpace($vmNamesRaw)) {
         Write-Host "Set $i: No VM names – skipping."
-        continue 
+        continue
     }
     $vmNames = $vmNamesRaw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
-    if ($vmNames.Count -eq 0) { 
+    if ($vmNames.Count -eq 0) {
         Write-Host "Set $i: No valid VM names – skipping."
-        continue 
+        continue
     }
 
     $cpuInput = $data.$("c$i")
@@ -265,7 +265,7 @@ if ($allJobs.Count -eq 0) {
 
 Write-Host "`nTotal jobs started: $($allJobs.Count)"
 
-# ---------- Wait for all jobs to complete with a global timeout (optional) ----------
+# ---------- Wait for all jobs to complete ----------
 Write-Host "Waiting for jobs to finish (max 10 minutes per job due to connection timeout)..."
 $allJobs | Wait-Job | Out-Null
 
