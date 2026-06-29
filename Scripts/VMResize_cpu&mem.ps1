@@ -1,26 +1,21 @@
 param($JsonInputs)
 $data = $JsonInputs | ConvertFrom-Json
 
-# --- Helpers (Keep original functions: Convert-ToInteger and Expand-Values) ---
+# Helper functions: Convert-ToInteger and Expand-Values (same as your original)
 function Convert-ToInteger {
     param([string]$value)
-    try {
-        $num = [double]$value
-        $rounded = [math]::Round($num)
-        return [int]$rounded
-    } catch { throw "Invalid number: '$value'" }
+    try { return [int][math]::Round([double]$value) } catch { throw "Invalid number: '$value'" }
 }
 
 function Expand-Values {
     param([string[]]$vmList, [string]$inputValue, [string]$valueName)
     $vmCount = $vmList.Count
     if ($vmCount -eq 0) { return @() }
-    
     $values = if ([string]::IsNullOrWhiteSpace($inputValue)) { @() } else { $inputValue -split ',' | ForEach-Object { Convert-ToInteger -value $_.Trim() } }
-
+    
     if ($values.Count -eq 0) {
         if ($valueName -eq "Delay") { return @(0) * $vmCount }
-        else { throw "No $valueName values provided." }
+        else { throw "No $valueName provided." }
     }
     if ($values.Count -eq 1) { return @($values[0]) * $vmCount }
     
@@ -29,13 +24,13 @@ function Expand-Values {
     return $result
 }
 
-# --- Preparation ---
+# --- Setup ---
 $logPath = Join-Path $env:GITHUB_WORKSPACE "data\resize_log.csv"
 if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
 if (Test-Path $logPath) { Remove-Item $logPath }
 
 $siteMap = @{ "Bangalore" = "192.168.136.50"; "Chennai" = "10.0.0.10"; "Pune" = "10.0.0.20" }
-$resizeJob = { ... } # (Use your existing job script block here)
+$resizeJob = { ... } # (Keep your existing job logic inside this block)
 
 # --- Process 3 Sets ---
 $taskConfigs = @(
@@ -58,5 +53,7 @@ foreach ($config in $taskConfigs) {
     }
 }
 
+# --- Finalize ---
 $allJobs | Wait-Job | Out-Null
 $allJobs | ForEach-Object { Receive-Job $_; Remove-Job $_ }
+Write-Host "`nAll jobs finished."
