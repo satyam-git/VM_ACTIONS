@@ -5,7 +5,7 @@ $data = $JsonInputs | ConvertFrom-Json
 $siteMap = @{
     "Bangalore" = "192.168.136.50"
     "Chennai"   = "10.0.0.10"
-    "Pune"      = "10.0.0.20"
+    "Pune"      = "10.0.0.20"   # Update with your actual IP
 }
 
 $siteName = $data.s1
@@ -18,38 +18,46 @@ $ClusterIP = $siteMap[$siteName]
 $RequestedCPU = [int]$data.c1
 $RequestedMemGB = [int]$data.m1
 
-# Parse VM list [cite: 2]
+# Parse VM list
 $vmNames = ($data.v1 -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
 
-# Parse delay list with enhancement: Handle single value or comma-separated list [cite: 3]
-$rawDelays = ($data.d1 -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+# Parse delay list
+$delaysInput = ($data.d1 -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
 
-$delaysInput = @()
-if ($rawDelays.Count -eq 1) {
-    # Apply single delay to all VMs [cite: 4]
-    for ($i = 0; $i -lt $vmNames.Count; $i++) {
-        $delaysInput += $rawDelays[0]
+# Determine delays for each VM
+$delays = @()
+
+if ($delaysInput.Count -eq 0) {
+    # If no delays provided, default to 0 for all
+    $delays = for ($i=0; $i -lt $vmNames.Count; $i++) { 0 }
+}
+elseif ($delaysInput.Count -eq 1) {
+    # If only one delay provided, apply it to all VMs
+    $singleDelay = [int]$delaysInput[0]
+    $delays = for ($i=0; $i -lt $vmNames.Count; $i++) { $singleDelay }
+}
+elseif ($delaysInput.Count -lt $vmNames.Count) {
+    # If fewer delays than VMs, pad with last delay value
+    $lastDelay = [int]$delaysInput[-1]
+    $delays = $delaysInput | ForEach-Object { [int]$_ }
+    while ($delays.Count -lt $vmNames.Count) {
+        $delays += $lastDelay
     }
-} else {
-    # Use provided list, padding or truncating as needed [cite: 4, 5]
-    $delaysInput = $rawDelays
-    while ($delaysInput.Count -lt $vmNames.Count) {
-        $delaysInput += '0'
-    }
-    if ($delaysInput.Count -gt $vmNames.Count) {
-        $delaysInput = $delaysInput[0..($vmNames.Count-1)]
+}
+else {
+    # If delays equal or more than VMs, take only as many as VMs
+    $delays = $delaysInput | ForEach-Object { [int]$_ }
+    if ($delays.Count -gt $vmNames.Count) {
+        $delays = $delays[0..($vmNames.Count - 1)]
     }
 }
 
-if ($vmNames.Count -eq 0) {
-    throw "No VM names provided."
-}
-
-# Build schedule (due time = now + delay in minutes) [cite: 5]
-$startTime = Get-Date
+# Build schedule with per-VM delays
 $schedule = @()
+$startTime = Get-Date
+
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
-    $delayMin = [int]$delaysInput[$i]
+    $delayMin = $delays[$i]
     $dueTime = $startTime.AddMinutes($delayMin)
     $schedule += [PSCustomObject]@{
         VMName    = $vmNames[$i]
@@ -97,7 +105,7 @@ function Resize-VM {
         return
     }
 
-    # Two‑strike shutdown [cite: 12, 13]
+    # Two‑strike shutdown
     Write-Host "[$VMName] Attempt 1: ACPI shutdown..."
     Set-NTNXVMPowerState -Vmid $VM.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
     Start-Sleep -Seconds 40
@@ -108,7 +116,7 @@ function Resize-VM {
         Start-Sleep -Seconds 20
     }
 
-    # Resize and power on [cite: 14, 15, 16]
+    # Resize and power on
     Write-Host "[$VMName] Applying: $FinalCPU CPU, $FinalMemGB GB RAM."
     Set-NTNXVirtualMachine -Vmid $VM.uuid -NumVcpus $FinalCPU -MemoryMb ($FinalMemGB * 1024) -ErrorAction Stop | Out-Null
     Set-NTNXVMPowerState -Vmid $VM.uuid -Transition ON -ErrorAction Stop | Out-Null
