@@ -1,145 +1,117 @@
 param($JsonInputs)
 $data = $JsonInputs | ConvertFrom-Json
+$logPath = Join-Path $env:GITHUB_WORKSPACE "data\vm_execution_log.csv"
 
-# ---------- Site to Cluster IP mapping ----------
 $siteMap = @{
-    "Bangalore" = "192.168.136.50"
-    "Chennai"   = "10.0.0.10"
-    "Pune"      = "10.0.0.20"   # Update with your actual IP
+    "Banglore" = "192.168.136.50"
+    "Chennai"  = "10.0.0.10"
 }
 
-$siteName = $data.s1
-if (-not $siteMap.ContainsKey($siteName)) {
-    throw "Site '$siteName' not found in mapping. Available: $($siteMap.Keys -join ', ')"
+if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
+if (Test-Path $logPath) { Remove-Item $logPath }
+
+$taskBlock = {
+    param($site, $vmName, $action, $delay, $user, $pass, $logPath, $siteMap)
+    $ip = $siteMap[$site]
+    if (-not $ip) { return }
+
+    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin }
+    
+    
+    if ([int]$delay -gt 0) { Start-Sleep -Seconds ([int]$delay * 60) }
+    
+    $creds = New-Object System.Security.SecureString
+    foreach ($char in $pass.ToCharArray()) { $creds.AppendChar($char) }
+    $creds.MakeReadOnly()
+    
+    $Status = "failed"
+    try {
+        Connect-NTNXCluster -Server $ip -UserName $user -Password $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
+        $vm = Get-NTNXVM | Where-Object { $_.vmName -eq $vmName }
+        
+        if ($null -eq $vm) { 
+            $Status = "VM Not Found" 
+        } else {
+            switch ($action) {
+                "start" { 
+                    if ($vm.powerState -eq "on") { $Status = "already on-hence skipped" } 
+                    else { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ON; $Status = "successful" }
+                }
+                "stop" { 
+                    if ($vm.powerState -eq "off") { $Status = "already off-hence skipped" } 
+                    else {
+                        Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN
+                        Start-Sleep -Seconds 45
+                        if ((Get-NTNXVM -Vmid $vm.uuid).powerState -eq "on") { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN }
+                        $Status = "successful"
+                    }
+                }
+                "restart" { 
+                    if ($vm.powerState -eq "off") { $Status = "its on off, please poweron" } 
+                    else {
+                        Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_REBOOT
+                        Start-Sleep -Seconds 45
+                        if ((Get-NTNXVM -Vmid $vm.uuid).powerState -ne "on") { Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_REBOOT }
+                        $Status = "successful"
+                    }
+                }
+            }
+        }
+    } catch { $Status = "failed - $($_.Exception.Message.Split(':')[0])" }
+    finally { Disconnect-NTNXCluster -Servers $ip -ErrorAction SilentlyContinue }
+    
+    "$site,$vmName,$action,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
 }
-$ClusterIP = $siteMap[$siteName]
 
-# Common CPU & memory
-$RequestedCPU = [int]$data.c1
-$RequestedMemGB = [int]$data.m1
 
-# Parse VM list and delay list
-$vmNames = ($data.v1 -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
-$delaysInput = ($data.d1 -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+function Get-DelaysForVMs {
+    param(
+        [string[]]$vmList,
+        [string]$delayInput
+    )
+    
+    $delays = $delayInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | ForEach-Object { [int]$_ }
+    $vmCount = $vmList.Count
 
-if ($vmNames.Count -eq 0) {
-    throw "No VM names provided."
-}
-
-# ---------- ENHANCED DELAY PARSING LOGIC ----------
-# Case B: If a single delay (e.g. "2") is provided for multiple VMs, replicate it for all.
-if ($delaysInput.Count -eq 1 -and $vmNames.Count -gt 1) {
-    $singleDelay = $delaysInput[0]
-    while ($delaysInput.Count -lt $vmNames.Count) {
-        $delaysInput += $singleDelay
+    if ($delays.Count -eq 0) {
+        
+        return @(0) * $vmCount
     }
-} else {
-    # Case A: Mixed delays (e.g. "0,2") or default unbalanced padding
-    while ($delaysInput.Count -lt $vmNames.Count) {
-        $delaysInput += '0'
-    }
-}
-
-# If more delays than VMs, truncate to match the VM list length
-if ($delaysInput.Count -gt $vmNames.Count) {
-    $delaysInput = $delaysInput[0..($vmNames.Count-1)]
-}
-# --------------------------------------------------
-
-# Build schedule (due time = now + delay in minutes)
-$startTime = Get-Date
-$schedule = @()
-for ($i = 0; $i -lt $vmNames.Count; $i++) {
-    $delayMin = [int]$delaysInput[$i]
-    $dueTime = $startTime.AddMinutes($delayMin)
-    $schedule += [PSCustomObject]@{
-        VMName    = $vmNames[$i]
-        Delay     = $delayMin
-        DueTime   = $dueTime
-        Processed = $false
-    }
-}
-
-# ---------- Print schedule for debugging ----------
-Write-Host "`n===== Schedule ====="
-$schedule | ForEach-Object {
-    Write-Host "$($_.VMName) : delay $($_.Delay) min, due at $($_.DueTime.ToString('HH:mm:ss'))"
-}
-Write-Host "Start time: $($startTime.ToString('HH:mm:ss'))`n"
-
-# ---------- Load Nutanix snapin and connect once ----------
-if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
-    Add-PSSnapin NutanixCmdletsPSSnapin | Out-Null
-}
-
-$Pass = $env:PE_PASS | ConvertTo-SecureString -AsPlainText -Force
-Connect-NTNXCluster -Server $ClusterIP -UserName $env:PE_USER -Password $Pass -AcceptInvalidSSLCerts | Out-Null
-
-# ---------- Function to resize a single VM ----------
-function Resize-VM {
-    param($VMName)
-
-    Write-Host "[$VMName] Starting resize..."
-    $VM = Get-NTNXVM | Where-Object { $_.vmName -eq $VMName }
-    if (-not $VM) {
-        Write-Host "[$VMName] ERROR: VM not found. Skipping."
-        return
+    if ($delays.Count -eq 1) {
+        
+        return @($delays[0]) * $vmCount
     }
 
-    $CurrentCPU = [int]$VM.numVcpus
-    $CurrentMemGB = [int]($VM.memoryMb / 1024)
-
-    $FinalCPU = if ($RequestedCPU -gt 0) { $RequestedCPU } else { $CurrentCPU }
-    $TempMem = if ($RequestedMemGB -gt 0) { $RequestedMemGB } else { $CurrentMemGB }
-    $FinalMemGB = if ($TempMem -lt 1) { 1 } else { $TempMem }
-
-    if ($FinalCPU -eq $CurrentCPU -and $FinalMemGB -eq $CurrentMemGB) {
-        Write-Host "[$VMName] No change needed. Skipping."
-        return
-    }
-
-    # Two‑strike shutdown
-    Write-Host "[$VMName] Attempt 1: ACPI shutdown..."
-    Set-NTNXVMPowerState -Vmid $VM.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
-    Start-Sleep -Seconds 40
-    $CheckVM = Get-NTNXVM -Vmid $VM.uuid
-    if ($CheckVM.powerState -eq "ON") {
-        Write-Host "[$VMName] Attempt 2: ACPI shutdown again..."
-        Set-NTNXVMPowerState -Vmid $VM.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
-        Start-Sleep -Seconds 20
-    }
-
-    # Resize and power on
-    Write-Host "[$VMName] Applying: $FinalCPU CPU, $FinalMemGB GB RAM."
-    Set-NTNXVirtualMachine -Vmid $VM.uuid -NumVcpus $FinalCPU -MemoryMb ($FinalMemGB * 1024) -ErrorAction Stop | Out-Null
-    Set-NTNXVMPowerState -Vmid $VM.uuid -Transition ON -ErrorAction Stop | Out-Null
-
-    Write-Host "[$VMName] SUCCESS: Resize completed."
-}
-
-# ---------- Process all VMs with delay 0 immediately ----------
-$immediate = $schedule | Where-Object { $_.Delay -eq 0 -and -not $_.Processed }
-foreach ($item in $immediate) {
-    Write-Host "`n----- Processing VM: $($item.VMName) (delay 0) -----"
-    Resize-VM -VMName $item.VMName
-    $item.Processed = $true
-}
-
-# ---------- Process delayed VMs in order of their due time ----------
-$delayed = $schedule | Where-Object { $_.Delay -gt 0 -and -not $_.Processed } | Sort-Object DueTime
-foreach ($item in $delayed) {
-    $now = Get-Date
-    if ($item.DueTime -gt $now) {
-        $waitSeconds = ($item.DueTime - $now).TotalSeconds
-        if ($waitSeconds -gt 0) {
-            Write-Host "Waiting $([math]::Round($waitSeconds, 1)) seconds for $($item.VMName) (delay $($item.Delay) min)..."
-            Start-Sleep -Seconds $waitSeconds
+    $result = @()
+    for ($i = 0; $i -lt $vmCount; $i++) {
+        if ($i -lt $delays.Count) {
+            $result += $delays[$i]
+        } else {
+            $result += $delays[-1]
         }
     }
-    Write-Host "`n----- Processing VM: $($item.VMName) (delay $($item.Delay) min) -----"
-    Resize-VM -VMName $item.VMName
-    $item.Processed = $true
+    return $result
 }
 
-Disconnect-NTNXCluster -Servers $ClusterIP
-Write-Host "`n===== All VMs processed successfully ====="
+for ($i = 1; $i -le 3; $i++) {
+    $site = $data.$("s$i")
+    if ($site -eq "None" -or [string]::IsNullOrWhiteSpace($site)) { continue }
+
+    $vmNamesRaw = $data.$("v$i")
+    if ([string]::IsNullOrWhiteSpace($vmNamesRaw)) { continue }
+    $vmList = $vmNamesRaw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+
+    $action = $data.$("a$i")
+    if ([string]::IsNullOrWhiteSpace($action)) { $action = "start" }  
+
+    $delayInput = $data.$("d$i")
+    if ([string]::IsNullOrWhiteSpace($delayInput)) { $delayInput = "0" }
+
+    $delays = Get-DelaysForVMs -vmList $vmList -delayInput $delayInput
+
+    for ($j = 0; $j -lt $vmList.Count; $j++) {
+        Start-Job -ScriptBlock $taskBlock -ArgumentList $site, $vmList[$j], $action, $delays[$j], $env:NUTANIX_USER, $env:NUTANIX_PASS, $logPath, $siteMap
+    }
+}
+
+Get-Job | Wait-Job | Receive-Job
