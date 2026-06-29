@@ -71,60 +71,35 @@ $logPath = Join-Path $env:GITHUB_WORKSPACE "data\resize_log.csv"
 if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
 if (Test-Path $logPath) { Remove-Item $logPath }
 
-# ---------- Check Nutanix snapin availability before starting jobs ----------
-Write-Host "Checking Nutanix snapin..."
+# ---------- Load Nutanix snapin ONCE in the main process ----------
+Write-Host "Loading Nutanix snapin..."
 if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
-    try {
-        Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
-        Write-Host "Nutanix snapin loaded successfully."
-    } catch {
-        throw "Failed to load Nutanix snapin: $($_.Exception.Message)"
-    }
-} else {
-    Write-Host "Nutanix snapin already loaded."
+    Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
 }
+Write-Host "Nutanix snapin loaded."
 
-# ---------- Define the job script block with extensive logging ----------
-$resizeJob = {
+# ---------- Define the work script that will run in each runspace ----------
+$scriptBlock = {
     param($site, $vmName, $delayMin, $cpu, $memGB, $user, $pass, $siteMap, $logPath)
-
-    $jobLogPath = Join-Path (Split-Path $logPath -Parent) "job_$vmName.log"
-    function Write-JobLog {
-        param([string]$msg)
-        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-        "$timestamp - $msg" | Out-File -FilePath $jobLogPath -Append -Encoding utf8
-    }
-
-    Write-JobLog "=== Job started for $vmName ==="
-    Write-JobLog "Site: $site, Delay: $delayMin min, CPU: $cpu, Memory: $memGB GB"
 
     $ip = $siteMap[$site]
     if (-not $ip) {
-        Write-JobLog "ERROR: Site '$site' not in mapping."
         "$site,$vmName,$cpu,$memGB,$delayMin,ERROR: Site not mapped" | Out-File -FilePath $logPath -Append -Encoding utf8
         return
     }
-    Write-JobLog "Cluster IP: $ip"
 
     # Wait for the delay (if any)
     if ($delayMin -gt 0) {
-        Write-JobLog "Waiting $delayMin minute(s)..."
+        Write-Host "[$vmName] Waiting $delayMin minute(s)..."
         Start-Sleep -Seconds ($delayMin * 60)
-        Write-JobLog "Wait finished."
+        Write-Host "[$vmName] Wait finished."
     }
-
-    # Load Nutanix snapin (inside job)
-    Write-JobLog "Loading Nutanix snapin inside job..."
-    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
-        Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop | Out-Null
-    }
-    Write-JobLog "Snapin loaded."
 
     $securePass = $pass | ConvertTo-SecureString -AsPlainText -Force
     $Status = "failed"
     try {
-        # ---- Connection with timeout ----
-        Write-JobLog "Connecting to $ip (timeout 30s)..."
+        Write-Host "[$vmName] Connecting to $ip (timeout 30s)..."
+        # We use a separate runspace for connection timeout
         $connJob = Start-Job -ScriptBlock {
             param($ip, $user, $pass)
             Connect-NTNXCluster -Server $ip -UserName $user -Password $pass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
@@ -135,21 +110,18 @@ $resizeJob = {
             Remove-Job $connJob
             throw "Connection to $ip timed out after 30 seconds."
         }
-        # Get any errors from the connection job
         Receive-Job $connJob -ErrorAction Stop
         Remove-Job $connJob
-        Write-JobLog "Connected successfully."
+        Write-Host "[$vmName] Connected."
 
-        # ---- Get VM and resize ----
-        Write-JobLog "Getting VM $vmName..."
         $vm = Get-NTNXVM | Where-Object { $_.vmName -eq $vmName }
         if (-not $vm) {
             $Status = "VM Not Found"
-            Write-JobLog "VM not found."
+            Write-Host "[$vmName] VM not found."
         } else {
             $CurrentCPU = [int]$vm.numVcpus
             $CurrentMemGB = [int]($vm.memoryMb / 1024)
-            Write-JobLog "Current: CPU=$CurrentCPU, Mem=$CurrentMemGB GB"
+            Write-Host "[$vmName] Current: CPU=$CurrentCPU, Mem=$CurrentMemGB GB"
 
             $FinalCPU = if ($cpu -gt 0) { $cpu } else { $CurrentCPU }
             $TempMem = if ($memGB -gt 0) { $memGB } else { $CurrentMemGB }
@@ -157,59 +129,49 @@ $resizeJob = {
 
             if ($FinalCPU -eq $CurrentCPU -and $FinalMemGB -eq $CurrentMemGB) {
                 $Status = "skipped (no change)"
-                Write-JobLog "No change needed."
+                Write-Host "[$vmName] No change needed."
             } else {
-                Write-JobLog "Attempt 1: ACPI shutdown..."
+                Write-Host "[$vmName] Attempt 1: ACPI shutdown..."
                 Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
                 Start-Sleep -Seconds 40
                 $CheckVM = Get-NTNXVM -Vmid $vm.uuid
                 if ($CheckVM.powerState -eq "ON") {
-                    Write-JobLog "Attempt 2: ACPI shutdown again..."
+                    Write-Host "[$vmName] Attempt 2: ACPI shutdown again..."
                     Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
                     Start-Sleep -Seconds 20
                 }
 
-                Write-JobLog "Applying: $FinalCPU CPU, $FinalMemGB GB RAM."
+                Write-Host "[$vmName] Applying: $FinalCPU CPU, $FinalMemGB GB RAM."
                 Set-NTNXVirtualMachine -Vmid $vm.uuid -NumVcpus $FinalCPU -MemoryMb ($FinalMemGB * 1024) -ErrorAction Stop | Out-Null
                 Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ON -ErrorAction Stop | Out-Null
                 $Status = "successful"
-                Write-JobLog "Resize completed."
+                Write-Host "[$vmName] Resize completed."
             }
         }
     } catch {
         $Status = "failed - $($_.Exception.Message.Split(':')[0])"
-        Write-JobLog "ERROR: $($_.Exception.Message)"
+        Write-Host "[$vmName] ERROR: $($_.Exception.Message)"
     } finally {
         Disconnect-NTNXCluster -Servers $ip -ErrorAction SilentlyContinue
-        Write-JobLog "Disconnected."
+        Write-Host "[$vmName] Disconnected."
     }
 
     "$site,$vmName,$cpu,$memGB,$delayMin,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
-    Write-JobLog "Final status: $Status"
-    Write-JobLog "=== Job finished ==="
+    Write-Host "[$vmName] Final status: $Status"
 }
 
-# ---------- Collect all jobs from all three sets ----------
-$allJobs = @()
-$MAX_DELAY_MINUTES = 60   # optional cap
+# ---------- Collect all VM tasks from all three sets ----------
+$tasks = @()
+$MAX_DELAY_MINUTES = 60
 
 for ($i = 1; $i -le 3; $i++) {
     $site = $data.$("s$i")
-    if (-not $site -or $site -eq "None") {
-        Write-Host ("Set {0}: Site is None or empty - skipping." -f $i)
-        continue
-    }
+    if (-not $site -or $site -eq "None") { continue }
 
     $vmNamesRaw = $data.$("v$i")
-    if ([string]::IsNullOrWhiteSpace($vmNamesRaw)) {
-        Write-Host ("Set {0}: No VM names - skipping." -f $i)
-        continue
-    }
+    if ([string]::IsNullOrWhiteSpace($vmNamesRaw)) { continue }
     $vmNames = $vmNamesRaw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
-    if ($vmNames.Count -eq 0) {
-        Write-Host ("Set {0}: No valid VM names - skipping." -f $i)
-        continue
-    }
+    if ($vmNames.Count -eq 0) { continue }
 
     $cpuInput = $data.$("c$i")
     $memInput = $data.$("m$i")
@@ -217,7 +179,6 @@ for ($i = 1; $i -le 3; $i++) {
 
     Write-Host ("`nSet {0} ({1}): VM count = {2}, CPU input = '{3}', Mem input = '{4}', Delay input = '{5}'" -f $i, $site, $vmNames.Count, $cpuInput, $memInput, $delayInput)
 
-    # Expand values for this set
     try {
         $cpus = Expand-Values -vmList $vmNames -inputValue $cpuInput -valueName "CPU"
         $mems = Expand-Values -vmList $vmNames -inputValue $memInput -valueName "Memory"
@@ -230,75 +191,65 @@ for ($i = 1; $i -le 3; $i++) {
     # Cap delays
     for ($j = 0; $j -lt $delays.Count; $j++) {
         if ($delays[$j] -gt $MAX_DELAY_MINUTES) {
-            Write-Warning "Delay of $($delays[$j]) minutes exceeds cap. Capping to $MAX_DELAY_MINUTES."
+            Write-Warning "Delay of $($delays[$j]) minutes capped to $MAX_DELAY_MINUTES."
             $delays[$j] = $MAX_DELAY_MINUTES
         }
     }
 
-    # Print set summary
     Write-Host ("===== Set {0} ({1}) =====" -f $i, $site)
     for ($j = 0; $j -lt $vmNames.Count; $j++) {
         Write-Host "$($vmNames[$j]) : CPU=$($cpus[$j]), Memory=$($mems[$j]) GB, delay=$($delays[$j]) min"
     }
 
-    # Start a job for each VM in this set
     for ($j = 0; $j -lt $vmNames.Count; $j++) {
-        Write-Host "Starting job for $($vmNames[$j])..."
-        $job = Start-Job -ScriptBlock $resizeJob -ArgumentList `
-            $site,
-            $vmNames[$j],
-            $delays[$j],
-            $cpus[$j],
-            $mems[$j],
-            $env:PE_USER,
-            $env:PE_PASS,
-            $siteMap,
-            $logPath
-        $allJobs += $job
+        $tasks += [PSCustomObject]@{
+            Site    = $site
+            VMName  = $vmNames[$j]
+            CPU     = $cpus[$j]
+            Mem     = $mems[$j]
+            Delay   = $delays[$j]
+        }
     }
 }
 
-if ($allJobs.Count -eq 0) {
+if ($tasks.Count -eq 0) {
     Write-Host "`nNo VMs to process. Exiting."
     exit 0
 }
 
-Write-Host "`nTotal jobs started: $($allJobs.Count)"
+Write-Host "`nTotal tasks: $($tasks.Count)"
+Write-Host "Starting parallel execution using runspaces..."
 
-# ---------- Wait for all jobs to complete ----------
-Write-Host "Waiting for jobs to finish (max 10 minutes per job due to connection timeout)..."
-$allJobs | Wait-Job | Out-Null
+# ---------- Run all tasks in parallel using runspaces ----------
+$runspacePool = [runspacefactory]::CreateRunspacePool(1, $tasks.Count)
+$runspacePool.Open()
+$jobs = @()
 
-# ---------- Receive output from each job ----------
-Write-Host "`n----- Job Outputs -----"
-$allJobs | ForEach-Object {
-    $job = $_
-    Write-Host "`n--- Job $($job.Id) ($($job.Name)) ---"
-    $output = Receive-Job $job -ErrorAction SilentlyContinue
-    if ($output) { $output }
-    # Also show any error records
-    $errors = Receive-Job $job -ErrorVariable jobErrors -ErrorAction SilentlyContinue
-    if ($jobErrors) { $jobErrors | ForEach-Object { Write-Host "ERROR: $_" } }
-    Remove-Job $job
+foreach ($task in $tasks) {
+    $powershell = [powershell]::Create()
+    $powershell.RunspacePool = $runspacePool
+    $powershell.AddScript($scriptBlock).AddArgument($task.Site).AddArgument($task.VMName).AddArgument($task.Delay).AddArgument($task.CPU).AddArgument($task.Mem).AddArgument($env:PE_USER).AddArgument($env:PE_PASS).AddArgument($siteMap).AddArgument($logPath) | Out-Null
+    $jobs += [PSCustomObject]@{
+        PowerShell = $powershell
+        Handle     = $powershell.BeginInvoke()
+        Task       = $task
+    }
 }
 
-# ---------- Show the log files ----------
+# ---------- Wait for all to complete ----------
+Write-Host "`nWaiting for all tasks to finish..."
+foreach ($job in $jobs) {
+    $job.PowerShell.EndInvoke($job.Handle) | Out-Null
+    $job.PowerShell.Dispose()
+}
+$runspacePool.Dispose()
+
+# ---------- Show log ----------
 Write-Host "`n===== CSV Log ($logPath) ====="
 if (Test-Path $logPath) {
     Get-Content $logPath | Write-Host
 } else {
     Write-Host "No CSV log found."
-}
-
-Write-Host "`n===== Individual job logs (in 'data' folder) ====="
-$jobLogs = Get-ChildItem "data\job_*.log" -ErrorAction SilentlyContinue
-if ($jobLogs) {
-    $jobLogs | ForEach-Object {
-        Write-Host "`n--- $($_.Name) ---"
-        Get-Content $_.FullName | Write-Host
-    }
-} else {
-    Write-Host "No job logs found."
 }
 
 Write-Host "`n===== All VMs processed. ====="
