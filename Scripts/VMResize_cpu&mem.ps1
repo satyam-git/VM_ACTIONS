@@ -71,16 +71,71 @@ $logPath = Join-Path $env:GITHUB_WORKSPACE "data\resize_log.csv"
 if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
 if (Test-Path $logPath) { Remove-Item $logPath }
 
-# ---------- Load Nutanix snapin ONCE in the main process ----------
-Write-Host "Loading Nutanix snapin..."
-if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
-    Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
+# ---------- Build a list of all tasks (VM, site, CPU, memory, delay) ----------
+$tasks = @()
+$MAX_DELAY_MINUTES = 60
+
+for ($set = 1; $set -le 3; $set++) {
+    $site = $data.$("s$set")
+    if (-not $site -or $site -eq "None") { continue }
+
+    $vmNamesRaw = $data.$("v$set")
+    if ([string]::IsNullOrWhiteSpace($vmNamesRaw)) { continue }
+    $vmNames = $vmNamesRaw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+    if ($vmNames.Count -eq 0) { continue }
+
+    $cpuInput = $data.$("c$set")
+    $memInput = $data.$("m$set")
+    $delayInput = $data.$("d$set")
+
+    Write-Host ("`nSet {0} ({1}): VM count = {2}, CPU input = '{3}', Mem input = '{4}', Delay input = '{5}'" -f $set, $site, $vmNames.Count, $cpuInput, $memInput, $delayInput)
+
+    try {
+        $cpus = Expand-Values -vmList $vmNames -inputValue $cpuInput -valueName "CPU"
+        $mems = Expand-Values -vmList $vmNames -inputValue $memInput -valueName "Memory"
+        $delays = Expand-Values -vmList $vmNames -inputValue $delayInput -valueName "Delay"
+    } catch {
+        Write-Host ("ERROR in Set {0}: {1}" -f $set, $_)
+        continue
+    }
+
+    # Cap delays
+    for ($j = 0; $j -lt $delays.Count; $j++) {
+        if ($delays[$j] -gt $MAX_DELAY_MINUTES) {
+            Write-Warning "Delay of $($delays[$j]) minutes capped to $MAX_DELAY_MINUTES."
+            $delays[$j] = $MAX_DELAY_MINUTES
+        }
+    }
+
+    Write-Host ("===== Set {0} ({1}) =====" -f $set, $site)
+    for ($j = 0; $j -lt $vmNames.Count; $j++) {
+        Write-Host "$($vmNames[$j]) : CPU=$($cpus[$j]), Memory=$($mems[$j]) GB, delay=$($delays[$j]) min"
+        $tasks += [PSCustomObject]@{
+            Site    = $site
+            VMName  = $vmNames[$j]
+            CPU     = $cpus[$j]
+            Mem     = $mems[$j]
+            Delay   = $delays[$j]
+        }
+    }
 }
-Write-Host "Nutanix snapin loaded."
+
+if ($tasks.Count -eq 0) {
+    Write-Host "`nNo VMs to process. Exiting."
+    exit 0
+}
+
+Write-Host "`nTotal tasks: $($tasks.Count)"
+Write-Host "Starting parallel execution using runspaces..."
 
 # ---------- Define the work script that will run in each runspace ----------
 $scriptBlock = {
     param($site, $vmName, $delayMin, $cpu, $memGB, $user, $pass, $siteMap, $logPath)
+
+    # ---------- Load Nutanix snapin INSIDE the runspace ----------
+    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
+        Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
+    }
 
     $ip = $siteMap[$site]
     if (-not $ip) {
@@ -98,8 +153,8 @@ $scriptBlock = {
     $securePass = $pass | ConvertTo-SecureString -AsPlainText -Force
     $Status = "failed"
     try {
+        # ---- Connection with timeout ----
         Write-Host "[$vmName] Connecting to $ip (timeout 30s)..."
-        # We use a separate runspace for connection timeout
         $connJob = Start-Job -ScriptBlock {
             param($ip, $user, $pass)
             Connect-NTNXCluster -Server $ip -UserName $user -Password $pass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
@@ -114,6 +169,7 @@ $scriptBlock = {
         Remove-Job $connJob
         Write-Host "[$vmName] Connected."
 
+        # ---- Get VM and resize ----
         $vm = Get-NTNXVM | Where-Object { $_.vmName -eq $vmName }
         if (-not $vm) {
             $Status = "VM Not Found"
@@ -159,66 +215,6 @@ $scriptBlock = {
     "$site,$vmName,$cpu,$memGB,$delayMin,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
     Write-Host "[$vmName] Final status: $Status"
 }
-
-# ---------- Collect all VM tasks from all three sets ----------
-$tasks = @()
-$MAX_DELAY_MINUTES = 60
-
-for ($i = 1; $i -le 3; $i++) {
-    $site = $data.$("s$i")
-    if (-not $site -or $site -eq "None") { continue }
-
-    $vmNamesRaw = $data.$("v$i")
-    if ([string]::IsNullOrWhiteSpace($vmNamesRaw)) { continue }
-    $vmNames = $vmNamesRaw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
-    if ($vmNames.Count -eq 0) { continue }
-
-    $cpuInput = $data.$("c$i")
-    $memInput = $data.$("m$i")
-    $delayInput = $data.$("d$i")
-
-    Write-Host ("`nSet {0} ({1}): VM count = {2}, CPU input = '{3}', Mem input = '{4}', Delay input = '{5}'" -f $i, $site, $vmNames.Count, $cpuInput, $memInput, $delayInput)
-
-    try {
-        $cpus = Expand-Values -vmList $vmNames -inputValue $cpuInput -valueName "CPU"
-        $mems = Expand-Values -vmList $vmNames -inputValue $memInput -valueName "Memory"
-        $delays = Expand-Values -vmList $vmNames -inputValue $delayInput -valueName "Delay"
-    } catch {
-        Write-Host ("ERROR in Set {0}: {1}" -f $i, $_)
-        continue
-    }
-
-    # Cap delays
-    for ($j = 0; $j -lt $delays.Count; $j++) {
-        if ($delays[$j] -gt $MAX_DELAY_MINUTES) {
-            Write-Warning "Delay of $($delays[$j]) minutes capped to $MAX_DELAY_MINUTES."
-            $delays[$j] = $MAX_DELAY_MINUTES
-        }
-    }
-
-    Write-Host ("===== Set {0} ({1}) =====" -f $i, $site)
-    for ($j = 0; $j -lt $vmNames.Count; $j++) {
-        Write-Host "$($vmNames[$j]) : CPU=$($cpus[$j]), Memory=$($mems[$j]) GB, delay=$($delays[$j]) min"
-    }
-
-    for ($j = 0; $j -lt $vmNames.Count; $j++) {
-        $tasks += [PSCustomObject]@{
-            Site    = $site
-            VMName  = $vmNames[$j]
-            CPU     = $cpus[$j]
-            Mem     = $mems[$j]
-            Delay   = $delays[$j]
-        }
-    }
-}
-
-if ($tasks.Count -eq 0) {
-    Write-Host "`nNo VMs to process. Exiting."
-    exit 0
-}
-
-Write-Host "`nTotal tasks: $($tasks.Count)"
-Write-Host "Starting parallel execution using runspaces..."
 
 # ---------- Run all tasks in parallel using runspaces ----------
 $runspacePool = [runspacefactory]::CreateRunspacePool(1, $tasks.Count)
