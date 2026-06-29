@@ -53,7 +53,7 @@ $startTime = Get-Date
 $schedule = @()
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
     $delayMin = [int]$delaysInput[$i]
-    # Sanity check: warn if delay > 2 hours
+    # Optional: warn if delay > 2 hours (adjust as needed)
     if ($delayMin -gt 120) {
         Write-Warning "VM '$($vmNames[$i])' has a delay of $delayMin minutes (> 2 hours). Are you sure?"
     }
@@ -79,9 +79,9 @@ if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinu
     Add-PSSnapin NutanixCmdletsPSSnapin | Out-Null
 }
 
-# ---------- Test network connectivity first ----------
+# ---------- Test network connectivity (no -TimeoutSeconds for compatibility) ----------
 Write-Host "Testing connectivity to $ClusterIP ..."
-if (-not (Test-Connection -ComputerName $ClusterIP -Count 1 -TimeoutSeconds 5 -Quiet)) {
+if (-not (Test-Connection -ComputerName $ClusterIP -Count 1 -Quiet)) {
     throw "Cannot reach cluster IP '$ClusterIP'. Please check network/firewall."
 }
 
