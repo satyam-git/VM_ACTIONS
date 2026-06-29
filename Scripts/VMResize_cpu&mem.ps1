@@ -26,11 +26,24 @@ if ($vmNames.Count -eq 0) {
     throw "No VM names provided."
 }
 
-# Pad delays with '0' if fewer than VMs
-while ($delaysInput.Count -lt $vmNames.Count) {
-    $delaysInput += '0'
+# Normalise delays:
+# - If no delays given, default to '0'
+if ($delaysInput.Count -eq 0) {
+    $delaysInput = @('0')
 }
-# If more delays than VMs, truncate
+
+# - If only one delay value, replicate it to all VMs
+if ($delaysInput.Count -eq 1 -and $vmNames.Count -gt 1) {
+    $delaysInput = @($delaysInput[0]) * $vmNames.Count
+}
+else {
+    # - If fewer delays than VMs (but more than 1), pad with zeros
+    while ($delaysInput.Count -lt $vmNames.Count) {
+        $delaysInput += '0'
+    }
+}
+
+# - If more delays than VMs, truncate
 if ($delaysInput.Count -gt $vmNames.Count) {
     $delaysInput = $delaysInput[0..($vmNames.Count-1)]
 }
