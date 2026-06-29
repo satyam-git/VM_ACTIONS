@@ -1,5 +1,4 @@
 name: Nutanix VMResize_cpu&mem
-
 on:
   workflow_dispatch:
     inputs:
@@ -8,7 +7,6 @@ on:
       c1: { description: '1: CPU Cores (applies to all)', required: true, type: string }
       m1: { description: '1: Memory (GB) (applies to all)', required: true, type: string }
       d1: { description: '1: Delays (min, comma separated, same order as VMs OR single value for all)', required: false, default: '0', type: string }
-
 jobs:
   run-compute-resize:
     runs-on: self-hosted
