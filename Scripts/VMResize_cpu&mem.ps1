@@ -26,25 +26,14 @@ if ($vmNames.Count -eq 0) {
     throw "No VM names provided."
 }
 
-# ---------- ENHANCED DELAY PARSING LOGIC ----------
-# Case B: If a single delay (e.g. "2") is provided for multiple VMs, replicate it for all.
-if ($delaysInput.Count -eq 1 -and $vmNames.Count -gt 1) {
-    $singleDelay = $delaysInput[0]
-    while ($delaysInput.Count -lt $vmNames.Count) {
-        $delaysInput += $singleDelay
-    }
-} else {
-    # Case A: Mixed delays (e.g. "0,2") or default unbalanced padding
-    while ($delaysInput.Count -lt $vmNames.Count) {
-        $delaysInput += '0'
-    }
+# Pad delays with '0' if fewer than VMs
+while ($delaysInput.Count -lt $vmNames.Count) {
+    $delaysInput += '0'
 }
-
-# If more delays than VMs, truncate to match the VM list length
+# If more delays than VMs, truncate
 if ($delaysInput.Count -gt $vmNames.Count) {
     $delaysInput = $delaysInput[0..($vmNames.Count-1)]
 }
-# --------------------------------------------------
 
 # Build schedule (due time = now + delay in minutes)
 $startTime = Get-Date
