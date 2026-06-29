@@ -8,11 +8,13 @@ on:
       c1: { description: '1: CPU Cores (comma separated, per VM or single)', required: false, type: string }
       m1: { description: '1: Memory (GB) (comma separated, per VM or single)', required: false, type: string }
       d1: { description: '1: Delays (min, comma separated, per VM or single)', required: false, default: '0', type: string }
+
       s2: { description: '2: Site Name', required: false, type: choice, options: [None, Bangalore, Pune, Chennai], default: 'None' }
       v2: { description: '2: VM Names (comma separated)', required: false, type: string }
       c2: { description: '2: CPU Cores (comma separated, per VM or single)', required: false, type: string }
       m2: { description: '2: Memory (GB) (comma separated, per VM or single)', required: false, type: string }
       d2: { description: '2: Delays (min, comma separated, per VM or single)', required: false, default: '0', type: string }
+
       s3: { description: '3: Site Name', required: false, type: choice, options: [None, Bangalore, Pune, Chennai], default: 'None' }
       v3: { description: '3: VM Names (comma separated)', required: false, type: string }
       c3: { description: '3: CPU Cores (comma separated, per VM or single)', required: false, type: string }
