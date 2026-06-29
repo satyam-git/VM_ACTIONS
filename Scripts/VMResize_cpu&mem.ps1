@@ -1,61 +1,79 @@
 param($JsonInputs)
 $data = $JsonInputs | ConvertFrom-Json
 
-# ---------- Site to Cluster IP mapping ----------
-$siteMap = @{
-    "Bangalore" = "192.168.136.50"
-    "Chennai"   = "10.0.0.10"
-    "Pune"      = "10.0.0.20"   # Update with your actual IP
+# ---------- Helper: convert any numeric string to integer (with rounding) ----------
+function Convert-ToInteger {
+    param([string]$value)
+    try {
+        $num = [double]$value
+        $rounded = [math]::Round($num)
+        if ($num -ne $rounded) {
+            Write-Warning "Value '$value' is not an integer. It will be rounded to $rounded."
+        }
+        return [int]$rounded
+    } catch {
+        throw "Invalid number: '$value'. Please provide an integer (e.g., 2, 4, 8)."
+    }
 }
 
-$siteName = $data.s1
-if (-not $siteMap.ContainsKey($siteName)) {
-    throw "Site '$siteName' not found in mapping. Available: $($siteMap.Keys -join ', ')"
+# ---------- Helper: expand a single value or a list to match VM count ----------
+function Expand-Values {
+    param(
+        [string[]]$vmList,
+        [string]$inputValue,
+        [string]$valueName   # e.g., "CPU", "Memory", "Delay"
+    )
+    $vmCount = $vmList.Count
+    if ($vmCount -eq 0) { return @() }
+
+    $values = if ([string]::IsNullOrWhiteSpace($inputValue)) {
+        # Default: if no input, use 0 for delay, or maybe we don't have a default for CPU/mem? We'll handle that later.
+        # For CPU/Mem, we cannot default to 0, so we'll throw if empty.
+        @()
+    } else {
+        $inputValue -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | ForEach-Object {
+            Convert-ToInteger -value $_
+        }
+    }
+
+    if ($values.Count -eq 0) {
+        # If no values given, we need to decide:
+        # - For Delay: default to 0
+        # - For CPU/Mem: throw an error because they are required.
+        if ($valueName -eq "Delay") {
+            return @(0) * $vmCount
+        } else {
+            throw "No $valueName values provided. Please specify $valueName for each VM."
+        }
+    }
+
+    if ($values.Count -eq 1) {
+        # Single value: replicate to all VMs
+        return @($values[0]) * $vmCount
+    }
+
+    # Multiple values: truncate or pad with the last value
+    $result = @()
+    for ($i = 0; $i -lt $vmCount; $i++) {
+        if ($i -lt $values.Count) { $result += $values[$i] }
+        else { $result += $values[-1] }
+    }
+    return $result
 }
-$ClusterIP = $siteMap[$siteName]
 
-# Common CPU & memory
-$RequestedCPU = [int]$data.c1
-$RequestedMemGB = [int]$data.m1
-
-# Parse VM list
+# ---------- Parse VM list ----------
 $vmNames = ($data.v1 -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
 if ($vmNames.Count -eq 0) {
     throw "No VM names provided."
 }
 
-# ---------- Delay replication (same as Get-DelaysForVMs) ----------
-function Get-DelaysForVMs {
-    param(
-        [string[]]$vmList,
-        [string]$delayInput
-    )
-    $vmCount = $vmList.Count
-    if ($vmCount -eq 0) { return @() }
+# ---------- Expand CPU, Memory, and Delay ----------
+$cpus = Expand-Values -vmList $vmNames -inputValue $data.c1 -valueName "CPU"
+$mems = Expand-Values -vmList $vmNames -inputValue $data.m1 -valueName "Memory"
+$delays = Expand-Values -vmList $vmNames -inputValue $data.d1 -valueName "Delay"
 
-    $delays = if ([string]::IsNullOrWhiteSpace($delayInput)) {
-        @(0)
-    } else {
-        $delayInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | ForEach-Object { [int]$_ }
-    }
-
-    if ($delays.Count -eq 0) { return @(0) * $vmCount }
-    if ($delays.Count -eq 1) { return @($delays[0]) * $vmCount }
-
-    # More than 1 delay – truncate or pad with last value
-    $result = @()
-    for ($i = 0; $i -lt $vmCount; $i++) {
-        if ($i -lt $delays.Count) { $result += $delays[$i] }
-        else { $result += $delays[-1] }
-    }
-    return $result
-}
-
-# ---------- Build delay list ----------
-$delays = Get-DelaysForVMs -vmList $vmNames -delayInput $data.d1
-
-# ---------- Optional: cap delays to prevent "non-ending" waits ----------
-$MAX_DELAY_MINUTES = 60   # change as needed
+# ---------- Optional: cap delays ----------
+$MAX_DELAY_MINUTES = 60
 for ($i = 0; $i -lt $delays.Count; $i++) {
     if ($delays[$i] -gt $MAX_DELAY_MINUTES) {
         Write-Warning "Delay of $($delays[$i]) minutes exceeds cap of $MAX_DELAY_MINUTES. Capping to $MAX_DELAY_MINUTES."
@@ -63,10 +81,10 @@ for ($i = 0; $i -lt $delays.Count; $i++) {
     }
 }
 
-# ---------- Print schedule for debugging ----------
+# ---------- Print schedule ----------
 Write-Host "`n===== Schedule (parallel jobs) ====="
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
-    Write-Host "$($vmNames[$i]) : delay $($delays[$i]) min"
+    Write-Host "$($vmNames[$i]) : CPU=$($cpus[$i]), Memory=$($mems[$i]) GB, delay=$($delays[$i]) min"
 }
 Write-Host "Start time: $(Get-Date -Format 'HH:mm:ss')`n"
 
@@ -74,6 +92,19 @@ Write-Host "Start time: $(Get-Date -Format 'HH:mm:ss')`n"
 $logPath = Join-Path $env:GITHUB_WORKSPACE "data\resize_log.csv"
 if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
 if (Test-Path $logPath) { Remove-Item $logPath }
+
+# ---------- Site mapping ----------
+$siteMap = @{
+    "Bangalore" = "192.168.136.50"
+    "Chennai"   = "10.0.0.10"
+    "Pune"      = "10.0.0.20"
+}
+
+$siteName = $data.s1
+if (-not $siteMap.ContainsKey($siteName)) {
+    throw "Site '$siteName' not found in mapping. Available: $($siteMap.Keys -join ', ')"
+}
+$ClusterIP = $siteMap[$siteName]   # not directly used but kept for consistency
 
 # ---------- Define the job script block ----------
 $resizeJob = {
@@ -150,8 +181,8 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
         $siteName,
         $vmNames[$i],
         $delays[$i],
-        $RequestedCPU,
-        $RequestedMemGB,
+        $cpus[$i],
+        $mems[$i],
         $env:PE_USER,
         $env:PE_PASS,
         $siteMap,
