@@ -27,8 +27,6 @@ function Expand-Values {
     if ($vmCount -eq 0) { return @() }
 
     $values = if ([string]::IsNullOrWhiteSpace($inputValue)) {
-        # Default: if no input, use 0 for delay, or maybe we don't have a default for CPU/mem? We'll handle that later.
-        # For CPU/Mem, we cannot default to 0, so we'll throw if empty.
         @()
     } else {
         $inputValue -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | ForEach-Object {
@@ -37,9 +35,6 @@ function Expand-Values {
     }
 
     if ($values.Count -eq 0) {
-        # If no values given, we need to decide:
-        # - For Delay: default to 0
-        # - For CPU/Mem: throw an error because they are required.
         if ($valueName -eq "Delay") {
             return @(0) * $vmCount
         } else {
@@ -48,11 +43,9 @@ function Expand-Values {
     }
 
     if ($values.Count -eq 1) {
-        # Single value: replicate to all VMs
         return @($values[0]) * $vmCount
     }
 
-    # Multiple values: truncate or pad with the last value
     $result = @()
     for ($i = 0; $i -lt $vmCount; $i++) {
         if ($i -lt $values.Count) { $result += $values[$i] }
@@ -61,38 +54,6 @@ function Expand-Values {
     return $result
 }
 
-# ---------- Parse VM list ----------
-$vmNames = ($data.v1 -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
-if ($vmNames.Count -eq 0) {
-    throw "No VM names provided."
-}
-
-# ---------- Expand CPU, Memory, and Delay ----------
-$cpus = Expand-Values -vmList $vmNames -inputValue $data.c1 -valueName "CPU"
-$mems = Expand-Values -vmList $vmNames -inputValue $data.m1 -valueName "Memory"
-$delays = Expand-Values -vmList $vmNames -inputValue $data.d1 -valueName "Delay"
-
-# ---------- Optional: cap delays ----------
-$MAX_DELAY_MINUTES = 60
-for ($i = 0; $i -lt $delays.Count; $i++) {
-    if ($delays[$i] -gt $MAX_DELAY_MINUTES) {
-        Write-Warning "Delay of $($delays[$i]) minutes exceeds cap of $MAX_DELAY_MINUTES. Capping to $MAX_DELAY_MINUTES."
-        $delays[$i] = $MAX_DELAY_MINUTES
-    }
-}
-
-# ---------- Print schedule ----------
-Write-Host "`n===== Schedule (parallel jobs) ====="
-for ($i = 0; $i -lt $vmNames.Count; $i++) {
-    Write-Host "$($vmNames[$i]) : CPU=$($cpus[$i]), Memory=$($mems[$i]) GB, delay=$($delays[$i]) min"
-}
-Write-Host "Start time: $(Get-Date -Format 'HH:mm:ss')`n"
-
-# ---------- Prepare logging ----------
-$logPath = Join-Path $env:GITHUB_WORKSPACE "data\resize_log.csv"
-if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
-if (Test-Path $logPath) { Remove-Item $logPath }
-
 # ---------- Site mapping ----------
 $siteMap = @{
     "Bangalore" = "192.168.136.50"
@@ -100,11 +61,10 @@ $siteMap = @{
     "Pune"      = "10.0.0.20"
 }
 
-$siteName = $data.s1
-if (-not $siteMap.ContainsKey($siteName)) {
-    throw "Site '$siteName' not found in mapping. Available: $($siteMap.Keys -join ', ')"
-}
-$ClusterIP = $siteMap[$siteName]   # not directly used but kept for consistency
+# ---------- Prepare logging ----------
+$logPath = Join-Path $env:GITHUB_WORKSPACE "data\resize_log.csv"
+if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
+if (Test-Path $logPath) { Remove-Item $logPath }
 
 # ---------- Define the job script block ----------
 $resizeJob = {
@@ -116,13 +76,11 @@ $resizeJob = {
         return
     }
 
-    # Wait for the delay (if any)
     if ($delayMin -gt 0) {
         Write-Host "[$vmName] Waiting $delayMin minute(s)..."
         Start-Sleep -Seconds ($delayMin * 60)
     }
 
-    # Load Nutanix snapin
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
         Add-PSSnapin NutanixCmdletsPSSnapin
     }
@@ -146,7 +104,6 @@ $resizeJob = {
             if ($FinalCPU -eq $CurrentCPU -and $FinalMemGB -eq $CurrentMemGB) {
                 $Status = "skipped (no change)"
             } else {
-                # Two‑strike shutdown
                 Write-Host "[$vmName] Attempt 1: ACPI shutdown..."
                 Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
                 Start-Sleep -Seconds 40
@@ -157,7 +114,6 @@ $resizeJob = {
                     Start-Sleep -Seconds 20
                 }
 
-                # Resize and power on
                 Write-Host "[$vmName] Applying: $FinalCPU CPU, $FinalMemGB GB RAM."
                 Set-NTNXVirtualMachine -Vmid $vm.uuid -NumVcpus $FinalCPU -MemoryMb ($FinalMemGB * 1024) -ErrorAction Stop | Out-Null
                 Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ON -ErrorAction Stop | Out-Null
@@ -174,28 +130,69 @@ $resizeJob = {
     Write-Host "[$vmName] $Status"
 }
 
-# ---------- Start a background job for each VM ----------
-$jobs = @()
-for ($i = 0; $i -lt $vmNames.Count; $i++) {
-    $job = Start-Job -ScriptBlock $resizeJob -ArgumentList `
-        $siteName,
-        $vmNames[$i],
-        $delays[$i],
-        $cpus[$i],
-        $mems[$i],
-        $env:PE_USER,
-        $env:PE_PASS,
-        $siteMap,
-        $logPath
-    $jobs += $job
+# ---------- Collect all jobs from all three sets ----------
+$allJobs = @()
+$MAX_DELAY_MINUTES = 60   # optional cap
+
+for ($i = 1; $i -le 3; $i++) {
+    $site = $data.$("s$i")
+    if (-not $site -or $site -eq "None") { continue }
+
+    $vmNamesRaw = $data.$("v$i")
+    if ([string]::IsNullOrWhiteSpace($vmNamesRaw)) { continue }
+    $vmNames = $vmNamesRaw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+    if ($vmNames.Count -eq 0) { continue }
+
+    $cpuInput = $data.$("c$i")
+    $memInput = $data.$("m$i")
+    $delayInput = $data.$("d$i")
+
+    # Expand values for this set
+    $cpus = Expand-Values -vmList $vmNames -inputValue $cpuInput -valueName "CPU"
+    $mems = Expand-Values -vmList $vmNames -inputValue $memInput -valueName "Memory"
+    $delays = Expand-Values -vmList $vmNames -inputValue $delayInput -valueName "Delay"
+
+    # Cap delays
+    for ($j = 0; $j -lt $delays.Count; $j++) {
+        if ($delays[$j] -gt $MAX_DELAY_MINUTES) {
+            Write-Warning "Delay of $($delays[$j]) minutes exceeds cap. Capping to $MAX_DELAY_MINUTES."
+            $delays[$j] = $MAX_DELAY_MINUTES
+        }
+    }
+
+    # Print set summary
+    Write-Host "`n===== Set $i ($site) ====="
+    for ($j = 0; $j -lt $vmNames.Count; $j++) {
+        Write-Host "$($vmNames[$j]) : CPU=$($cpus[$j]), Memory=$($mems[$j]) GB, delay=$($delays[$j]) min"
+    }
+
+    # Start a job for each VM in this set
+    for ($j = 0; $j -lt $vmNames.Count; $j++) {
+        $job = Start-Job -ScriptBlock $resizeJob -ArgumentList `
+            $site,
+            $vmNames[$j],
+            $delays[$j],
+            $cpus[$j],
+            $mems[$j],
+            $env:PE_USER,
+            $env:PE_PASS,
+            $siteMap,
+            $logPath
+        $allJobs += $job
+    }
+}
+
+if ($allJobs.Count -eq 0) {
+    Write-Host "No VMs to process. Exiting."
+    exit 0
 }
 
 # ---------- Wait for all jobs to complete ----------
 Write-Host "`nWaiting for all resize jobs to finish..."
-$jobs | Wait-Job | Out-Null
+$allJobs | Wait-Job | Out-Null
 
 # ---------- Receive output from each job ----------
-$jobs | ForEach-Object {
+$allJobs | ForEach-Object {
     Receive-Job $_ -ErrorAction SilentlyContinue
     Remove-Job $_
 }
