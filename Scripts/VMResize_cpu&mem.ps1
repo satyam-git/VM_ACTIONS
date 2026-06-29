@@ -48,6 +48,16 @@ if ($delaysInput.Count -gt $vmNames.Count) {
     $delaysInput = $delaysInput[0..($vmNames.Count-1)]
 }
 
+# ---------- SAFETY: cap delays at 60 minutes (optional) ----------
+$MAX_DELAY_MINUTES = 60
+for ($i = 0; $i -lt $delaysInput.Count; $i++) {
+    $val = [int]$delaysInput[$i]
+    if ($val -gt $MAX_DELAY_MINUTES) {
+        Write-Warning "Delay of $val minutes exceeds cap of $MAX_DELAY_MINUTES. Capping to $MAX_DELAY_MINUTES."
+        $delaysInput[$i] = $MAX_DELAY_MINUTES.ToString()
+    }
+}
+
 # Build schedule (due time = now + delay in minutes)
 $startTime = Get-Date
 $schedule = @()
