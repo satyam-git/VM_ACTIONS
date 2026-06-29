@@ -106,33 +106,28 @@ function Resize-VM {
     Write-Host "[$VMName] SUCCESS: Resize completed."
 }
 
-# ---------- Main scheduling loop (revised) ----------
-while ($true) {
+# ---------- Process all VMs with delay 0 immediately ----------
+$immediate = $schedule | Where-Object { $_.Delay -eq 0 -and -not $_.Processed }
+foreach ($item in $immediate) {
+    Write-Host "`n----- Processing VM: $($item.VMName) (delay 0) -----"
+    Resize-VM -VMName $item.VMName
+    $item.Processed = $true
+}
+
+# ---------- Process delayed VMs in order of their due time ----------
+$delayed = $schedule | Where-Object { $_.Delay -gt 0 -and -not $_.Processed } | Sort-Object DueTime
+foreach ($item in $delayed) {
     $now = Get-Date
-
-    # Find all unprocessed VMs whose due time has arrived
-    $dueNow = $schedule | Where-Object { -not $_.Processed -and $_.DueTime -le $now }
-
-    if ($dueNow.Count -gt 0) {
-        # Process all that are due now
-        foreach ($item in $dueNow) {
-            Write-Host "`n----- Processing VM: $($item.VMName) (delay was $($item.Delay) min) -----"
-            Resize-VM -VMName $item.VMName
-            $item.Processed = $true
-        }
-    } else {
-        # No VM is due yet – find the earliest future due time
-        $next = $schedule | Where-Object { -not $_.Processed } | Sort-Object DueTime | Select-Object -First 1
-        if (-not $next) {
-            # All VMs processed
-            break
-        }
-        $waitSeconds = ($next.DueTime - $now).TotalSeconds
+    if ($item.DueTime -gt $now) {
+        $waitSeconds = ($item.DueTime - $now).TotalSeconds
         if ($waitSeconds -gt 0) {
-            Write-Host "Waiting $([math]::Round($waitSeconds, 1)) seconds until next VM is due..."
+            Write-Host "Waiting $([math]::Round($waitSeconds, 1)) seconds for $($item.VMName) (delay $($item.Delay) min)..."
             Start-Sleep -Seconds $waitSeconds
         }
     }
+    Write-Host "`n----- Processing VM: $($item.VMName) (delay $($item.Delay) min) -----"
+    Resize-VM -VMName $item.VMName
+    $item.Processed = $true
 }
 
 Disconnect-NTNXCluster -Servers $ClusterIP
