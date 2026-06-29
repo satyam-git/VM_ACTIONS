@@ -8,19 +8,17 @@ on:
       c1: { description: '1: CPU Cores (applies to all)', required: true, type: string }
       m1: { description: '1: Memory (GB) (applies to all)', required: true, type: string }
       d1: { description: '1: Delays (min, comma separated, same order as VMs)', required: false, default: '0', type: string }
-
-
       s2: { description: '2: Site Name', required: false, type: choice, options: [Bangalore, Pune, Chennai] }
-      v2: { description: '2: VM Names (comma separated)', required: false, type: string }
-      c2: { description: '2: CPU Cores', required: false, type: string }
-      m2: { description: '2: Memory (GB)', required: false, type: string }
-      d2: { description: '2: Delays', required: false, default: '0', type: string }
+      v2: { description: '2: VM Names', required: false, type: string }
+      c2: { description: '2: CPU', required: false, type: string }
+      m2: { description: '2: Memory', required: false, type: string }
+      d2: { description: '2: Delay', required: false, default: '0', type: string }
 
       s3: { description: '3: Site Name', required: false, type: choice, options: [Bangalore, Pune, Chennai] }
-      v3: { description: '3: VM Names (comma separated)', required: false, type: string }
-      c3: { description: '3: CPU Cores', required: false, type: string }
-      m3: { description: '3: Memory (GB)', required: false, type: string }
-      d3: { description: '3: Delays', required: false, default: '0', type: string }
+      v3: { description: '3: VM Names', required: false, type: string }
+      c3: { description: '3: CPU', required: false, type: string }
+      m3: { description: '3: Memory', required: false, type: string }
+      d3: { description: '3: Delay', required: false, default: '0', type: string }
 
 jobs:
   run-compute-resize:
