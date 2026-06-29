@@ -36,4 +36,4 @@ jobs:
             mem_size   = "${{ github.event.inputs.mem_size }}"
           }
           $json = $inputs | ConvertTo-Json
-          & "$env:GITHUB_WORKSPACE\Scripts\VMResize.ps1" -JsonInputs $json
+          & "$env:GITHUB_WORKSPACE\Scripts\VMResize_cpu&mem.ps1" -JsonInputs $json
