@@ -1,4 +1,4 @@
-name: Nutanix VM Resize
+name: Nutanix VM Resize CPU&Mem
 
 on:
   workflow_dispatch:
