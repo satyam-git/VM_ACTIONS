@@ -1,19 +1,20 @@
 param($JsonInputs)
 $data = $JsonInputs | ConvertFrom-Json
 
-# Site mapping
+# ---------- Site to Cluster IP mapping ----------
 $siteMap = @{
     "Bangalore" = "192.168.136.50"
     "Chennai"   = "10.0.0.10"
-    "Pune"      = "10.0.0.20"
+    "Pune"      = "10.0.0.20"   # Update with your actual IP
 }
 
 $siteName = $data.s1
 if (-not $siteMap.ContainsKey($siteName)) {
-    throw "Site '$siteName' not found."
+    throw "Site '$siteName' not found in mapping. Available: $($siteMap.Keys -join ', ')"
 }
 $ClusterIP = $siteMap[$siteName]
 
+# Common CPU & memory
 $RequestedCPU = [int]$data.c1
 $RequestedMemGB = [int]$data.m1
 
@@ -25,16 +26,16 @@ if ($vmNames.Count -eq 0) {
     throw "No VM names provided."
 }
 
-# Pad delays with '0' if needed
+# Pad delays with '0' if fewer than VMs
 while ($delaysInput.Count -lt $vmNames.Count) {
     $delaysInput += '0'
 }
-# Trim to VM count if more
+# If more delays than VMs, truncate
 if ($delaysInput.Count -gt $vmNames.Count) {
     $delaysInput = $delaysInput[0..($vmNames.Count-1)]
 }
 
-# Build schedule
+# Build schedule (due time = now + delay in minutes)
 $startTime = Get-Date
 $schedule = @()
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
@@ -48,11 +49,14 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
     }
 }
 
-Write-Host "Schedule:"
-$schedule | ForEach-Object { Write-Host "$($_.VMName) delay $($_.Delay) min, due at $($_.DueTime.ToString('HH:mm:ss'))" }
-Write-Host "Start time: $($startTime.ToString('HH:mm:ss'))"
+# ---------- Print schedule for debugging ----------
+Write-Host "`n===== Schedule ====="
+$schedule | ForEach-Object {
+    Write-Host "$($_.VMName) : delay $($_.Delay) min, due at $($_.DueTime.ToString('HH:mm:ss'))"
+}
+Write-Host "Start time: $($startTime.ToString('HH:mm:ss'))`n"
 
-# Load Nutanix snapin once
+# ---------- Load Nutanix snapin and connect once ----------
 if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
     Add-PSSnapin NutanixCmdletsPSSnapin | Out-Null
 }
@@ -60,23 +64,30 @@ if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinu
 $Pass = $env:PE_PASS | ConvertTo-SecureString -AsPlainText -Force
 Connect-NTNXCluster -Server $ClusterIP -UserName $env:PE_USER -Password $Pass -AcceptInvalidSSLCerts | Out-Null
 
+# ---------- Function to resize a single VM ----------
 function Resize-VM {
     param($VMName)
+
     Write-Host "[$VMName] Starting resize..."
     $VM = Get-NTNXVM | Where-Object { $_.vmName -eq $VMName }
     if (-not $VM) {
         Write-Host "[$VMName] ERROR: VM not found. Skipping."
         return
     }
+
     $CurrentCPU = [int]$VM.numVcpus
     $CurrentMemGB = [int]($VM.memoryMb / 1024)
+
     $FinalCPU = if ($RequestedCPU -gt 0) { $RequestedCPU } else { $CurrentCPU }
     $TempMem = if ($RequestedMemGB -gt 0) { $RequestedMemGB } else { $CurrentMemGB }
     $FinalMemGB = if ($TempMem -lt 1) { 1 } else { $TempMem }
+
     if ($FinalCPU -eq $CurrentCPU -and $FinalMemGB -eq $CurrentMemGB) {
         Write-Host "[$VMName] No change needed. Skipping."
         return
     }
+
+    # Two‑strike shutdown
     Write-Host "[$VMName] Attempt 1: ACPI shutdown..."
     Set-NTNXVMPowerState -Vmid $VM.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
     Start-Sleep -Seconds 40
@@ -86,33 +97,42 @@ function Resize-VM {
         Set-NTNXVMPowerState -Vmid $VM.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
         Start-Sleep -Seconds 20
     }
+
+    # Resize and power on
     Write-Host "[$VMName] Applying: $FinalCPU CPU, $FinalMemGB GB RAM."
     Set-NTNXVirtualMachine -Vmid $VM.uuid -NumVcpus $FinalCPU -MemoryMb ($FinalMemGB * 1024) -ErrorAction Stop | Out-Null
     Set-NTNXVMPowerState -Vmid $VM.uuid -Transition ON -ErrorAction Stop | Out-Null
+
     Write-Host "[$VMName] SUCCESS: Resize completed."
 }
 
-# Main loop
-$remaining = $schedule | Where-Object { -not $_.Processed }
-while ($remaining.Count -gt 0) {
-    # Find earliest due
-    $next = $remaining | Sort-Object DueTime | Select-Object -First 1
+# ---------- Main scheduling loop (revised) ----------
+while ($true) {
     $now = Get-Date
-    if ($next.DueTime -gt $now) {
+
+    # Find all unprocessed VMs whose due time has arrived
+    $dueNow = $schedule | Where-Object { -not $_.Processed -and $_.DueTime -le $now }
+
+    if ($dueNow.Count -gt 0) {
+        # Process all that are due now
+        foreach ($item in $dueNow) {
+            Write-Host "`n----- Processing VM: $($item.VMName) (delay was $($item.Delay) min) -----"
+            Resize-VM -VMName $item.VMName
+            $item.Processed = $true
+        }
+    } else {
+        # No VM is due yet – find the earliest future due time
+        $next = $schedule | Where-Object { -not $_.Processed } | Sort-Object DueTime | Select-Object -First 1
+        if (-not $next) {
+            # All VMs processed
+            break
+        }
         $waitSeconds = ($next.DueTime - $now).TotalSeconds
         if ($waitSeconds -gt 0) {
             Write-Host "Waiting $([math]::Round($waitSeconds, 1)) seconds until next VM is due..."
             Start-Sleep -Seconds $waitSeconds
         }
     }
-    # Now get all VMs that are due
-    $dueNow = $remaining | Where-Object { $_.DueTime -le (Get-Date) }
-    foreach ($item in $dueNow) {
-        Write-Host "`n----- Processing VM: $($item.VMName) (delay was $($item.Delay) min) -----"
-        Resize-VM -VMName $item.VMName
-        $item.Processed = $true
-    }
-    $remaining = $schedule | Where-Object { -not $_.Processed }
 }
 
 Disconnect-NTNXCluster -Servers $ClusterIP
