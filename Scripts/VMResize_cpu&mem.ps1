@@ -5,7 +5,7 @@ $data = $JsonInputs | ConvertFrom-Json
 $siteMap = @{
     "Bangalore" = "192.168.136.50"
     "Chennai"   = "10.0.0.10"
-    "Pune"      = "10.0.0.20"   # Update with your actual IP
+    "Pune"      = "10.0.0.20"
 }
 
 $siteName = $data.s1
@@ -18,24 +18,34 @@ $ClusterIP = $siteMap[$siteName]
 $RequestedCPU = [int]$data.c1
 $RequestedMemGB = [int]$data.m1
 
-# Parse VM list and delay list
+# Parse VM list [cite: 2]
 $vmNames = ($data.v1 -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
-$delaysInput = ($data.d1 -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+
+# Parse delay list with enhancement: Handle single value or comma-separated list [cite: 3]
+$rawDelays = ($data.d1 -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+
+$delaysInput = @()
+if ($rawDelays.Count -eq 1) {
+    # Apply single delay to all VMs [cite: 4]
+    for ($i = 0; $i -lt $vmNames.Count; $i++) {
+        $delaysInput += $rawDelays[0]
+    }
+} else {
+    # Use provided list, padding or truncating as needed [cite: 4, 5]
+    $delaysInput = $rawDelays
+    while ($delaysInput.Count -lt $vmNames.Count) {
+        $delaysInput += '0'
+    }
+    if ($delaysInput.Count -gt $vmNames.Count) {
+        $delaysInput = $delaysInput[0..($vmNames.Count-1)]
+    }
+}
 
 if ($vmNames.Count -eq 0) {
     throw "No VM names provided."
 }
 
-# Pad delays with '0' if fewer than VMs
-while ($delaysInput.Count -lt $vmNames.Count) {
-    $delaysInput += '0'
-}
-# If more delays than VMs, truncate
-if ($delaysInput.Count -gt $vmNames.Count) {
-    $delaysInput = $delaysInput[0..($vmNames.Count-1)]
-}
-
-# Build schedule (due time = now + delay in minutes)
+# Build schedule (due time = now + delay in minutes) [cite: 5]
 $startTime = Get-Date
 $schedule = @()
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
@@ -87,7 +97,7 @@ function Resize-VM {
         return
     }
 
-    # Two‑strike shutdown
+    # Two‑strike shutdown [cite: 12, 13]
     Write-Host "[$VMName] Attempt 1: ACPI shutdown..."
     Set-NTNXVMPowerState -Vmid $VM.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
     Start-Sleep -Seconds 40
@@ -98,7 +108,7 @@ function Resize-VM {
         Start-Sleep -Seconds 20
     }
 
-    # Resize and power on
+    # Resize and power on [cite: 14, 15, 16]
     Write-Host "[$VMName] Applying: $FinalCPU CPU, $FinalMemGB GB RAM."
     Set-NTNXVirtualMachine -Vmid $VM.uuid -NumVcpus $FinalCPU -MemoryMb ($FinalMemGB * 1024) -ErrorAction Stop | Out-Null
     Set-NTNXVMPowerState -Vmid $VM.uuid -Transition ON -ErrorAction Stop | Out-Null
