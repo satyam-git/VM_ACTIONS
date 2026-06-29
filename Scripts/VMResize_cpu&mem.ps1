@@ -7,8 +7,9 @@ if (Test-Path $logPath) { Remove-Item $logPath }
 
 # ---------- Site to Cluster IP mapping ----------
 $siteMap = @{
-    "Banglore" = "192.168.136.50"
-    "Chennai"  = "10.0.0.10"
+    "Bangalore" = "192.168.136.50"
+    "Banglore"  = "192.168.136.50"   # alias for backward compatibility
+    "Chennai"   = "10.0.0.10"
     # Add more if needed
 }
 
@@ -102,6 +103,7 @@ function Invoke-VMAction {
 
     $ip = $siteMap[$site]
     if (-not $ip) {
+        Write-Host "[$vmName] ERROR: Site '$site' not found in mapping."
         "$site,$vmName,$action,ERROR: Site not in mapping" | Out-File -FilePath $logPath -Append -Encoding utf8
         return
     }
@@ -113,8 +115,9 @@ function Invoke-VMAction {
 
     $Status = "failed"
     try {
-        $securePass = $env:NUTANIX_PASS | ConvertTo-SecureString -AsPlainText -Force
-        Connect-NTNXCluster -Server $ip -UserName $env:NUTANIX_USER -Password $securePass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
+        # Use PE_USER and PE_PASS as defined in your workflow YML
+        $securePass = $env:PE_PASS | ConvertTo-SecureString -AsPlainText -Force
+        Connect-NTNXCluster -Server $ip -UserName $env:PE_USER -Password $securePass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
 
         $vm = Get-NTNXVM | Where-Object { $_.vmName -eq $vmName }
         if (-not $vm) {
