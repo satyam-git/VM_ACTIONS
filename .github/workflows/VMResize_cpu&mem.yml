@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       s1: { description: '1: Site Name', required: true, type: choice, options: [Bangalore, Pune, Chennai] }
-      v1: { description: '1: VM Name', required: true, type: string }
-      c1: { description: '1: CPU Cores', required: true, type: string }
-      m1: { description: '1: Memory (GB)', required: true, type: string }
-      d1: { description: '1: Delay (min)', required: false, default: '0', type: string }
+      v1: { description: '1: VM Names (comma separated)', required: true, type: string }
+      c1: { description: '1: CPU Cores (applies to all)', required: true, type: string }
+      m1: { description: '1: Memory (GB) (applies to all)', required: true, type: string }
+      d1: { description: '1: Delays (min, comma separated, same order as VMs)', required: false, default: '0', type: string }
 
 jobs:
   run-compute-resize:
