@@ -21,7 +21,7 @@ function Expand-Values {
     param(
         [string[]]$vmList,
         [string]$inputValue,
-        [string]$valueName   # e.g., "CPU", "Memory", "Delay"
+        [string]$valueName
     )
     $vmCount = $vmList.Count
     if ($vmCount -eq 0) { return @() }
@@ -66,21 +66,24 @@ $logPath = Join-Path $env:GITHUB_WORKSPACE "data\resize_log.csv"
 if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
 if (Test-Path $logPath) { Remove-Item $logPath }
 
-# ---------- Define the job script block ----------
+# ---------- Define the job script block with connection timeout ----------
 $resizeJob = {
     param($site, $vmName, $delayMin, $cpu, $memGB, $user, $pass, $siteMap, $logPath)
 
     $ip = $siteMap[$site]
     if (-not $ip) {
         "$site,$vmName,$cpu,$memGB,$delayMin,ERROR: Site not mapped" | Out-File -FilePath $logPath -Append -Encoding utf8
+        Write-Host "[$vmName] ERROR: Site '$site' not in mapping."
         return
     }
 
+    # Wait for the delay (if any)
     if ($delayMin -gt 0) {
         Write-Host "[$vmName] Waiting $delayMin minute(s)..."
         Start-Sleep -Seconds ($delayMin * 60)
     }
 
+    # Load Nutanix snapin
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
         Add-PSSnapin NutanixCmdletsPSSnapin
     }
@@ -88,8 +91,24 @@ $resizeJob = {
     $securePass = $pass | ConvertTo-SecureString -AsPlainText -Force
     $Status = "failed"
     try {
-        Connect-NTNXCluster -Server $ip -UserName $user -Password $securePass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
+        # ---- Connection with timeout ----
+        Write-Host "[$vmName] Connecting to $ip (timeout 30s)..."
+        $connJob = Start-Job -ScriptBlock {
+            param($ip, $user, $pass)
+            Connect-NTNXCluster -Server $ip -UserName $user -Password $pass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
+        } -ArgumentList $ip, $user, $securePass
 
+        if (-not (Wait-Job $connJob -Timeout 30)) {
+            Stop-Job $connJob
+            Remove-Job $connJob
+            throw "Connection to $ip timed out after 30 seconds."
+        }
+        # Get any errors from the connection job
+        Receive-Job $connJob -ErrorAction Stop
+        Remove-Job $connJob
+        Write-Host "[$vmName] Connected."
+
+        # ---- Get VM and resize ----
         $vm = Get-NTNXVM | Where-Object { $_.vmName -eq $vmName }
         if (-not $vm) {
             $Status = "VM Not Found"
@@ -122,6 +141,7 @@ $resizeJob = {
         }
     } catch {
         $Status = "failed - $($_.Exception.Message.Split(':')[0])"
+        Write-Host "[$vmName] ERROR: $($_.Exception.Message)"
     } finally {
         Disconnect-NTNXCluster -Servers $ip -ErrorAction SilentlyContinue
     }
