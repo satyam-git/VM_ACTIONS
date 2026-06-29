@@ -196,18 +196,18 @@ $MAX_DELAY_MINUTES = 60   # optional cap
 for ($i = 1; $i -le 3; $i++) {
     $site = $data.$("s$i")
     if (-not $site -or $site -eq "None") {
-        Write-Host "Set $i: Site is None or empty - skipping."
+        Write-Host ("Set {0}: Site is None or empty - skipping." -f $i)
         continue
     }
 
     $vmNamesRaw = $data.$("v$i")
     if ([string]::IsNullOrWhiteSpace($vmNamesRaw)) {
-        Write-Host "Set $i: No VM names - skipping."
+        Write-Host ("Set {0}: No VM names - skipping." -f $i)
         continue
     }
     $vmNames = $vmNamesRaw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
     if ($vmNames.Count -eq 0) {
-        Write-Host "Set $i: No valid VM names - skipping."
+        Write-Host ("Set {0}: No valid VM names - skipping." -f $i)
         continue
     }
 
@@ -215,7 +215,7 @@ for ($i = 1; $i -le 3; $i++) {
     $memInput = $data.$("m$i")
     $delayInput = $data.$("d$i")
 
-    Write-Host "`nSet $i ($site): VM count = $($vmNames.Count), CPU input = '$cpuInput', Mem input = '$memInput', Delay input = '$delayInput'"
+    Write-Host ("`nSet {0} ({1}): VM count = {2}, CPU input = '{3}', Mem input = '{4}', Delay input = '{5}'" -f $i, $site, $vmNames.Count, $cpuInput, $memInput, $delayInput)
 
     # Expand values for this set
     try {
@@ -223,7 +223,7 @@ for ($i = 1; $i -le 3; $i++) {
         $mems = Expand-Values -vmList $vmNames -inputValue $memInput -valueName "Memory"
         $delays = Expand-Values -vmList $vmNames -inputValue $delayInput -valueName "Delay"
     } catch {
-        Write-Host "ERROR in Set $i: $_"
+        Write-Host ("ERROR in Set {0}: {1}" -f $i, $_)
         continue
     }
 
@@ -236,7 +236,7 @@ for ($i = 1; $i -le 3; $i++) {
     }
 
     # Print set summary
-    Write-Host "===== Set $i ($site) ====="
+    Write-Host ("===== Set {0} ({1}) =====" -f $i, $site)
     for ($j = 0; $j -lt $vmNames.Count; $j++) {
         Write-Host "$($vmNames[$j]) : CPU=$($cpus[$j]), Memory=$($mems[$j]) GB, delay=$($delays[$j]) min"
     }
