@@ -196,18 +196,18 @@ $MAX_DELAY_MINUTES = 60   # optional cap
 for ($i = 1; $i -le 3; $i++) {
     $site = $data.$("s$i")
     if (-not $site -or $site -eq "None") {
-        Write-Host "Set $i: Site is None or empty – skipping."
+        Write-Host "Set $i: Site is None or empty - skipping."
         continue
     }
 
     $vmNamesRaw = $data.$("v$i")
     if ([string]::IsNullOrWhiteSpace($vmNamesRaw)) {
-        Write-Host "Set $i: No VM names – skipping."
+        Write-Host "Set $i: No VM names - skipping."
         continue
     }
     $vmNames = $vmNamesRaw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
     if ($vmNames.Count -eq 0) {
-        Write-Host "Set $i: No valid VM names – skipping."
+        Write-Host "Set $i: No valid VM names - skipping."
         continue
     }
 
