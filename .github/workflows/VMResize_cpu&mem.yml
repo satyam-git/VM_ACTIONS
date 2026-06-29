@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       # Set 1
-      s1: { description: '1: Site Name', required: false, type: choice, options: [None, Bangalore, Pune, Chennai] }
-      v1: { description: '1: VM Names', required: false, type: string }
-      c1: { description: '1: CPU Cores', required: false, type: string }
-      m1: { description: '1: Memory (GB)', required: false, type: string }
+      s1: { description: '1: Site Name', required: true, type: choice, options: [Bangalore, Pune, Chennai] }
+      v1: { description: '1: VM Names', required: true, type: string }
+      c1: { description: '1: CPU Cores', required: true, type: string }
+      m1: { description: '1: Memory (GB)', required: true, type: string }
       d1: { description: '1: Delay (min)', required: false, default: '0', type: string }
       # Set 2
       s2: { description: '2: Site Name', required: false, type: choice, options: [None, Bangalore, Pune, Chennai] }
