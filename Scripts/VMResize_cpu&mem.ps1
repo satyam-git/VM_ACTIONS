@@ -26,22 +26,13 @@ if ($vmNames.Count -eq 0) {
     throw "No VM names provided."
 }
 
-# ----- Delay handling -----
-# Blank delay -> all VMs get 0
-if ($delaysInput.Count -eq 0) {
-    $delaysInput = @('0')
+# Pad delays with '0' if fewer than VMs
+while ($delaysInput.Count -lt $vmNames.Count) {
+    $delaysInput += '0'
 }
-
-# Single delay -> apply to every VM
-if ($delaysInput.Count -eq 1) {
-    $singleDelay = $delaysInput[0]
-    $delaysInput = @()
-    foreach ($vm in $vmNames) {
-        $delaysInput += $singleDelay
-    }
-}
-elseif ($delaysInput.Count -ne $vmNames.Count) {
-    throw "Delay count must be either 1 or equal to the number of VMs."
+# If more delays than VMs, truncate
+if ($delaysInput.Count -gt $vmNames.Count) {
+    $delaysInput = $delaysInput[0..($vmNames.Count-1)]
 }
 
 # Build schedule (due time = now + delay in minutes)
