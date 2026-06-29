@@ -26,31 +26,24 @@ if ($vmNames.Count -eq 0) {
     throw "No VM names provided."
 }
 
-# ---------- Enhanced delay parsing ----------
-if ($delaysInput.Count -eq 0) {
-    # No delay given -> all 0
-    $delays = @('0') * $vmNames.Count
-} elseif ($delaysInput.Count -eq 1) {
-    # Single delay -> apply to all VMs
-    $delays = @($delaysInput[0]) * $vmNames.Count
-} elseif ($delaysInput.Count -eq $vmNames.Count) {
-    # Exactly as many delays as VMs -> direct map
-    $delays = $delaysInput
-} else {
-    # More delays than VMs -> truncate
-    # Fewer delays than VMs but more than 1 -> pad with the last delay value
-    $lastDelay = $delaysInput[-1]
-    $delays = $delaysInput + (@($lastDelay) * ($vmNames.Count - $delaysInput.Count))
-}
+# ----- Validate / Expand delay list -----
 
-# Convert to integers
-$delays = $delays | ForEach-Object { [int]$_ }
+if ($delaysInput.Count -eq 1 -and $vmNames.Count -gt 1) {
+    # Single delay specified -> apply to every VM
+    $delaysInput = @($delaysInput[0]) * $vmNames.Count
+}
+elseif ($delaysInput.Count -lt $vmNames.Count) {
+    throw "Number of delays must either be 1 or match the number of VMs."
+}
+elseif ($delaysInput.Count -gt $vmNames.Count) {
+    throw "More delays specified than VMs."
+}
 
 # Build schedule (due time = now + delay in minutes)
 $startTime = Get-Date
 $schedule = @()
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
-    $delayMin = $delays[$i]
+    $delayMin = [int]$delaysInput[$i]
     $dueTime = $startTime.AddMinutes($delayMin)
     $schedule += [PSCustomObject]@{
         VMName    = $vmNames[$i]
