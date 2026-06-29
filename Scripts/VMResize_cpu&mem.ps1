@@ -24,7 +24,7 @@ if ($vmNames.Count -eq 0) {
     throw "No VM names provided."
 }
 
-# ---------- Enhanced delay handling ----------
+# ---------- ENHANCED DELAY HANDLING (single delay replication) ----------
 $delaysInput = ($data.d1 -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
 
 # If no delays given, default to '0'
@@ -53,10 +53,6 @@ $startTime = Get-Date
 $schedule = @()
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
     $delayMin = [int]$delaysInput[$i]
-    # Optional: warn if delay > 2 hours (adjust as needed)
-    if ($delayMin -gt 120) {
-        Write-Warning "VM '$($vmNames[$i])' has a delay of $delayMin minutes (> 2 hours). Are you sure?"
-    }
     $dueTime = $startTime.AddMinutes($delayMin)
     $schedule += [PSCustomObject]@{
         VMName    = $vmNames[$i]
@@ -73,36 +69,13 @@ $schedule | ForEach-Object {
 }
 Write-Host "Start time: $($startTime.ToString('HH:mm:ss'))`n"
 
-# ---------- Load Nutanix snapin ----------
-Write-Host "Loading Nutanix snapin..."
+# ---------- Load Nutanix snapin and connect once ----------
 if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
     Add-PSSnapin NutanixCmdletsPSSnapin | Out-Null
 }
 
-# ---------- Test network connectivity (no -TimeoutSeconds for compatibility) ----------
-Write-Host "Testing connectivity to $ClusterIP ..."
-if (-not (Test-Connection -ComputerName $ClusterIP -Count 1 -Quiet)) {
-    throw "Cannot reach cluster IP '$ClusterIP'. Please check network/firewall."
-}
-
-# ---------- Connect with a timeout (30 seconds) ----------
-Write-Host "Connecting to Nutanix cluster (timeout 30s)..."
 $Pass = $env:PE_PASS | ConvertTo-SecureString -AsPlainText -Force
-
-$connectionJob = Start-Job -ScriptBlock {
-    param($ip, $user, $pass)
-    Connect-NTNXCluster -Server $ip -UserName $user -Password $pass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
-} -ArgumentList $ClusterIP, $env:PE_USER, $Pass
-
-if (-not (Wait-Job $connectionJob -Timeout 30)) {
-    Stop-Job $connectionJob
-    Remove-Job $connectionJob
-    throw "Connection to Nutanix cluster timed out after 30 seconds."
-}
-# If job completed, receive any errors
-Receive-Job $connectionJob -ErrorAction Stop
-Remove-Job $connectionJob
-Write-Host "Connected successfully."
+Connect-NTNXCluster -Server $ClusterIP -UserName $env:PE_USER -Password $Pass -AcceptInvalidSSLCerts | Out-Null
 
 # ---------- Function to resize a single VM ----------
 function Resize-VM {
@@ -170,5 +143,5 @@ foreach ($item in $delayed) {
     $item.Processed = $true
 }
 
-Disconnect-NTNXCluster -Servers $ClusterIP -ErrorAction SilentlyContinue
+Disconnect-NTNXCluster -Servers $ClusterIP
 Write-Host "`n===== All VMs processed successfully ====="
