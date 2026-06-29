@@ -18,46 +18,28 @@ $ClusterIP = $siteMap[$siteName]
 $RequestedCPU = [int]$data.c1
 $RequestedMemGB = [int]$data.m1
 
-# Parse VM list
+# Parse VM list and delay list
 $vmNames = ($data.v1 -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
-
-# Parse delay list
 $delaysInput = ($data.d1 -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
 
-# Determine delays for each VM
-$delays = @()
-
-if ($delaysInput.Count -eq 0) {
-    # If no delays provided, default to 0 for all
-    $delays = for ($i=0; $i -lt $vmNames.Count; $i++) { 0 }
-}
-elseif ($delaysInput.Count -eq 1) {
-    # If only one delay provided, apply it to all VMs
-    $singleDelay = [int]$delaysInput[0]
-    $delays = for ($i=0; $i -lt $vmNames.Count; $i++) { $singleDelay }
-}
-elseif ($delaysInput.Count -lt $vmNames.Count) {
-    # If fewer delays than VMs, pad with last delay value
-    $lastDelay = [int]$delaysInput[-1]
-    $delays = $delaysInput | ForEach-Object { [int]$_ }
-    while ($delays.Count -lt $vmNames.Count) {
-        $delays += $lastDelay
-    }
-}
-else {
-    # If delays equal or more than VMs, take only as many as VMs
-    $delays = $delaysInput | ForEach-Object { [int]$_ }
-    if ($delays.Count -gt $vmNames.Count) {
-        $delays = $delays[0..($vmNames.Count - 1)]
-    }
+if ($vmNames.Count -eq 0) {
+    throw "No VM names provided."
 }
 
-# Build schedule with per-VM delays
-$schedule = @()
+# Pad delays with '0' if fewer than VMs
+while ($delaysInput.Count -lt $vmNames.Count) {
+    $delaysInput += '0'
+}
+# If more delays than VMs, truncate
+if ($delaysInput.Count -gt $vmNames.Count) {
+    $delaysInput = $delaysInput[0..($vmNames.Count-1)]
+}
+
+# Build schedule (due time = now + delay in minutes)
 $startTime = Get-Date
-
+$schedule = @()
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
-    $delayMin = $delays[$i]
+    $delayMin = [int]$delaysInput[$i]
     $dueTime = $startTime.AddMinutes($delayMin)
     $schedule += [PSCustomObject]@{
         VMName    = $vmNames[$i]
@@ -70,7 +52,7 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
 # ---------- Print schedule for debugging ----------
 Write-Host "`n===== Schedule ====="
 $schedule | ForEach-Object {
-    Write-Host "$($_.VMName) : delay $($_.Delay) min, due at $($_.DueTime.ToString('HH:mm:ss'))"
+    Write-Host "$($_.VMName) : delay $($_.Delay) min, due at $($_.DueTime).ToString('HH:mm:ss')"
 }
 Write-Host "Start time: $($startTime.ToString('HH:mm:ss'))`n"
 
@@ -105,7 +87,7 @@ function Resize-VM {
         return
     }
 
-    # Two‑strike shutdown
+    # Two-strike shutdown
     Write-Host "[$VMName] Attempt 1: ACPI shutdown..."
     Set-NTNXVMPowerState -Vmid $VM.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
     Start-Sleep -Seconds 40
@@ -136,17 +118,24 @@ foreach ($item in $immediate) {
 $delayed = $schedule | Where-Object { $_.Delay -gt 0 -and -not $_.Processed } | Sort-Object DueTime
 foreach ($item in $delayed) {
     $now = Get-Date
+    Write-Host "Current Time: $($now.ToString('HH:mm:ss'))"
+    Write-Host "Scheduled Due Time: $($item.DueTime.ToString('HH:mm:ss'))"
     if ($item.DueTime -gt $now) {
         $waitSeconds = ($item.DueTime - $now).TotalSeconds
         if ($waitSeconds -gt 0) {
-            Write-Host "Waiting $([math]::Round($waitSeconds, 1)) seconds for $($item.VMName) (delay $($item.Delay) min)..."
+            Write-Host "Waiting for $([math]::Round($waitSeconds, 2)) seconds for VM: $($item.VMName)"
             Start-Sleep -Seconds $waitSeconds
+        } else {
+            Write-Host "Due time already passed or zero. Proceeding immediately."
         }
+    } else {
+        Write-Host "Due time already passed. Proceeding immediately."
     }
-    Write-Host "`n----- Processing VM: $($item.VMName) (delay $($item.Delay) min) -----"
+    Write-Host "Processing VM: $($item.VMName)"
     Resize-VM -VMName $item.VMName
     $item.Processed = $true
 }
 
+# ---------- Disconnect from cluster ----------
 Disconnect-NTNXCluster -Servers $ClusterIP
 Write-Host "`n===== All VMs processed successfully ====="
