@@ -53,6 +53,10 @@ $startTime = Get-Date
 $schedule = @()
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
     $delayMin = [int]$delaysInput[$i]
+    # Sanity check: warn if delay > 2 hours
+    if ($delayMin -gt 120) {
+        Write-Warning "VM '$($vmNames[$i])' has a delay of $delayMin minutes (> 2 hours). Are you sure?"
+    }
     $dueTime = $startTime.AddMinutes($delayMin)
     $schedule += [PSCustomObject]@{
         VMName    = $vmNames[$i]
@@ -69,13 +73,36 @@ $schedule | ForEach-Object {
 }
 Write-Host "Start time: $($startTime.ToString('HH:mm:ss'))`n"
 
-# ---------- Load Nutanix snapin and connect once ----------
+# ---------- Load Nutanix snapin ----------
+Write-Host "Loading Nutanix snapin..."
 if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
     Add-PSSnapin NutanixCmdletsPSSnapin | Out-Null
 }
 
+# ---------- Test network connectivity first ----------
+Write-Host "Testing connectivity to $ClusterIP ..."
+if (-not (Test-Connection -ComputerName $ClusterIP -Count 1 -TimeoutSeconds 5 -Quiet)) {
+    throw "Cannot reach cluster IP '$ClusterIP'. Please check network/firewall."
+}
+
+# ---------- Connect with a timeout (30 seconds) ----------
+Write-Host "Connecting to Nutanix cluster (timeout 30s)..."
 $Pass = $env:PE_PASS | ConvertTo-SecureString -AsPlainText -Force
-Connect-NTNXCluster -Server $ClusterIP -UserName $env:PE_USER -Password $Pass -AcceptInvalidSSLCerts | Out-Null
+
+$connectionJob = Start-Job -ScriptBlock {
+    param($ip, $user, $pass)
+    Connect-NTNXCluster -Server $ip -UserName $user -Password $pass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
+} -ArgumentList $ClusterIP, $env:PE_USER, $Pass
+
+if (-not (Wait-Job $connectionJob -Timeout 30)) {
+    Stop-Job $connectionJob
+    Remove-Job $connectionJob
+    throw "Connection to Nutanix cluster timed out after 30 seconds."
+}
+# If job completed, receive any errors
+Receive-Job $connectionJob -ErrorAction Stop
+Remove-Job $connectionJob
+Write-Host "Connected successfully."
 
 # ---------- Function to resize a single VM ----------
 function Resize-VM {
@@ -143,5 +170,5 @@ foreach ($item in $delayed) {
     $item.Processed = $true
 }
 
-Disconnect-NTNXCluster -Servers $ClusterIP
+Disconnect-NTNXCluster -Servers $ClusterIP -ErrorAction SilentlyContinue
 Write-Host "`n===== All VMs processed successfully ====="
