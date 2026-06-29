@@ -128,11 +128,25 @@ if ($tasks.Count -eq 0) {
 Write-Host "`nTotal tasks: $($tasks.Count)"
 Write-Host "Starting parallel execution using runspaces..."
 
-# ---------- Define the work script that will run in each runspace ----------
+# ---------- Create InitialSessionState with the Nutanix snapin preloaded ----------
+$iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+try {
+    $iss.AddPSSnapIn("NutanixCmdletsPSSnapin", $null) | Out-Null
+    Write-Host "Nutanix snapin added to initial session state."
+} catch {
+    Write-Warning "Could not add Nutanix snapin to session state: $_"
+    Write-Warning "Will try to load it inside each runspace."
+}
+
+# ---------- Create runspace pool with the initial session state ----------
+$runspacePool = [runspacefactory]::CreateRunspacePool(1, $tasks.Count, $iss, $host)
+$runspacePool.Open()
+
+# ---------- Define the work script ----------
 $scriptBlock = {
     param($site, $vmName, $delayMin, $cpu, $memGB, $user, $pass, $siteMap, $logPath)
 
-    # ---------- Load Nutanix snapin INSIDE the runspace ----------
+    # Ensure snapin is loaded (redundant but safe)
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
         Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
     }
@@ -216,11 +230,8 @@ $scriptBlock = {
     Write-Host "[$vmName] Final status: $Status"
 }
 
-# ---------- Run all tasks in parallel using runspaces ----------
-$runspacePool = [runspacefactory]::CreateRunspacePool(1, $tasks.Count)
-$runspacePool.Open()
+# ---------- Start all tasks ----------
 $jobs = @()
-
 foreach ($task in $tasks) {
     $powershell = [powershell]::Create()
     $powershell.RunspacePool = $runspacePool
