@@ -26,14 +26,25 @@ if ($vmNames.Count -eq 0) {
     throw "No VM names provided."
 }
 
-# Pad delays with '0' if fewer than VMs
-while ($delaysInput.Count -lt $vmNames.Count) {
-    $delaysInput += '0'
+# ---------- ENHANCED DELAY PARSING LOGIC ----------
+# Case B: If a single delay (e.g. "2") is provided for multiple VMs, replicate it for all.
+if ($delaysInput.Count -eq 1 -and $vmNames.Count -gt 1) {
+    $singleDelay = $delaysInput[0]
+    while ($delaysInput.Count -lt $vmNames.Count) {
+        $delaysInput += $singleDelay
+    }
+} else {
+    # Case A: Mixed delays (e.g. "0,2") or default unbalanced padding
+    while ($delaysInput.Count -lt $vmNames.Count) {
+        $delaysInput += '0'
+    }
 }
-# If more delays than VMs, truncate
+
+# If more delays than VMs, truncate to match the VM list length
 if ($delaysInput.Count -gt $vmNames.Count) {
     $delaysInput = $delaysInput[0..($vmNames.Count-1)]
 }
+# --------------------------------------------------
 
 # Build schedule (due time = now + delay in minutes)
 $startTime = Get-Date
@@ -52,7 +63,7 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
 # ---------- Print schedule for debugging ----------
 Write-Host "`n===== Schedule ====="
 $schedule | ForEach-Object {
-    Write-Host "$($_.VMName) : delay $($_.Delay) min, due at $($_.DueTime).ToString('HH:mm:ss')"
+    Write-Host "$($_.VMName) : delay $($_.Delay) min, due at $($_.DueTime.ToString('HH:mm:ss'))"
 }
 Write-Host "Start time: $($startTime.ToString('HH:mm:ss'))`n"
 
@@ -87,7 +98,7 @@ function Resize-VM {
         return
     }
 
-    # Two-strike shutdown
+    # Two‑strike shutdown
     Write-Host "[$VMName] Attempt 1: ACPI shutdown..."
     Set-NTNXVMPowerState -Vmid $VM.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
     Start-Sleep -Seconds 40
@@ -118,24 +129,17 @@ foreach ($item in $immediate) {
 $delayed = $schedule | Where-Object { $_.Delay -gt 0 -and -not $_.Processed } | Sort-Object DueTime
 foreach ($item in $delayed) {
     $now = Get-Date
-    Write-Host "Current Time: $($now.ToString('HH:mm:ss'))"
-    Write-Host "Scheduled Due Time: $($item.DueTime.ToString('HH:mm:ss'))"
     if ($item.DueTime -gt $now) {
         $waitSeconds = ($item.DueTime - $now).TotalSeconds
         if ($waitSeconds -gt 0) {
-            Write-Host "Waiting for $([math]::Round($waitSeconds, 2)) seconds for VM: $($item.VMName)"
+            Write-Host "Waiting $([math]::Round($waitSeconds, 1)) seconds for $($item.VMName) (delay $($item.Delay) min)..."
             Start-Sleep -Seconds $waitSeconds
-        } else {
-            Write-Host "Due time already passed or zero. Proceeding immediately."
         }
-    } else {
-        Write-Host "Due time already passed. Proceeding immediately."
     }
-    Write-Host "Processing VM: $($item.VMName)"
+    Write-Host "`n----- Processing VM: $($item.VMName) (delay $($item.Delay) min) -----"
     Resize-VM -VMName $item.VMName
     $item.Processed = $true
 }
 
-# ---------- Disconnect from cluster ----------
 Disconnect-NTNXCluster -Servers $ClusterIP
 Write-Host "`n===== All VMs processed successfully ====="
