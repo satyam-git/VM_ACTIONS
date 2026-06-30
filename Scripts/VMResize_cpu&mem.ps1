@@ -54,6 +54,45 @@ function Expand-Values {
     return $result
 }
 
+# ---------- Helper: extract CPU from VM object ----------
+function Get-VMCPU {
+    param($vm)
+    $cpuProp = $vm.PSObject.Properties | Where-Object { $_.Name -match 'numvcpus' } | Select-Object -First 1
+    if ($cpuProp) {
+        try { return [int]$cpuProp.Value } catch { return 0 }
+    }
+    return 0
+}
+
+# ---------- Helper: extract Memory in GB from VM object ----------
+function Get-VMMemoryGB {
+    param($vm)
+    # List of common property names for memory in MB
+    $commonNames = @('memoryMb', 'MemoryMb', 'memoryMB', 'MemoryMB', 'memory_mb', 'Memory_MB', 'memorySizeInMB')
+    foreach ($name in $commonNames) {
+        $val = $vm.$name
+        if ($val -ne $null) {
+            try {
+                $memBytes = [double]$val
+                if ($memBytes -gt 0) {
+                    return [math]::Round($memBytes / 1024, 0)
+                }
+            } catch {}
+        }
+    }
+    # Fallback: scan all properties for 'memory' and numeric value
+    $memProps = $vm.PSObject.Properties | Where-Object { $_.Name -match 'memory' -and $_.Value -is [numeric] }
+    foreach ($p in $memProps) {
+        try {
+            $val = [double]$p.Value
+            if ($val -gt 0) {
+                return [math]::Round($val / 1024, 0)
+            }
+        } catch {}
+    }
+    return 0
+}
+
 # ---------- Parse VM list ----------
 $vmNames = ($data.v1 -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
 if ($vmNames.Count -eq 0) {
@@ -140,22 +179,8 @@ $resizeJob = {
             $Status = "VM Not Found"
         } else {
             # ---- Robust retrieval of current CPU and memory ----
-            # Try to get numVcpus (case-insensitive)
-            $cpuProp = $vm.PSObject.Properties | Where-Object { $_.Name -match 'numvcpus' } | Select-Object -First 1
-            if ($cpuProp) { $CurrentCPU = [int]$cpuProp.Value } else { $CurrentCPU = 0 }
-
-            # Try to get memory in MB (try common property names)
-            $memProps = @('memoryMb', 'MemoryMb', 'memoryMB', 'MemoryMB', 'memory_mb')
-            $memValue = $null
-            foreach ($prop in $memProps) {
-                $p = $vm.PSObject.Properties | Where-Object { $_.Name -eq $prop } | Select-Object -First 1
-                if ($p) { $memValue = $p.Value; break }
-            }
-            if ($memValue -ne $null) {
-                $CurrentMemGB = [math]::Round([double]$memValue / 1024, 0)   # round to nearest integer GB
-            } else {
-                $CurrentMemGB = 0
-            }
+            $CurrentCPU = Get-VMCPU -vm $vm
+            $CurrentMemGB = Get-VMMemoryGB -vm $vm
 
             # Debug output (will appear in job logs)
             Write-Host "[$vmName] Detected: CPU=$CurrentCPU, Memory=${CurrentMemGB}GB"
