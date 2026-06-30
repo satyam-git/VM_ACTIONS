@@ -82,14 +82,14 @@ for ($i = 0; $i -lt $delays.Count; $i++) {
 }
 
 # ---------- Print schedule ----------
-Write-Host "\n===== Schedule (parallel jobs) ====="
+Write-Host "`n===== Schedule (parallel jobs) ====="
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
     Write-Host "$($vmNames[$i]) : CPU=$($cpus[$i]), Memory=$($mems[$i]) GB, delay=$($delays[$i]) min"
 }
-Write-Host "Start time: $(Get-Date -Format 'HH:mm:ss')\n"
+Write-Host "Start time: $(Get-Date -Format 'HH:mm:ss')`n"
 
 # ---------- Prepare logging ----------
-$logPath = Join-Path $env:GITHUB_WORKSPACE "data\\resize_log.csv"
+$logPath = Join-Path $env:GITHUB_WORKSPACE "data\resize_log.csv"
 if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
 if (Test-Path $logPath) { Remove-Item $logPath }
 
@@ -112,7 +112,7 @@ $resizeJob = {
 
     $ip = $siteMap[$site]
     if (-not $ip) {
-        # Enhanced format: SiteName,VMName,CurrentCPU,CurrentMem,NewCPU,NewMem,Status
+        # Enhanced logging with fallback placeholders
         "$site,$vmName,N/A,N/A,$cpu,$memGB,ERROR: Site not mapped" | Out-File -FilePath $logPath -Append -Encoding utf8
         return
     }
@@ -142,6 +142,7 @@ $resizeJob = {
         if (-not $vm) {
             $Status = "VM Not Found"
         } else {
+            # Capture current settings before modifying
             $CurrentCPU = [int]$vm.numVcpus
             $CurrentMemGB = [int]($vm.memoryMb / 1024)
 
@@ -176,7 +177,7 @@ $resizeJob = {
         Disconnect-NTNXCluster -Servers $ip -ErrorAction SilentlyContinue
     }
 
-    # Enhanced log row with original and new sizing details
+    # Enhanced CSV write including: SiteName,VMName,CurrentCPU,CurrentMem,NewCPU,NewMem,Status
     "$site,$vmName,$CurrentCPU,$CurrentMemGB,$FinalCPU,$FinalMemGB,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
     Write-Host "[$vmName] $Status"
 }
@@ -184,21 +185,21 @@ $resizeJob = {
 # ---------- Start a background job for each VM ----------
 $jobs = @()
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
-    $job = Start-Job -ScriptBlock $resizeJob -ArgumentList \\\\`
-        $siteName, \\\\`
-        $vmNames[$i], \\\\`
-        $delays[$i], \\\\`
-        $cpus[$i], \\\\`
-        $mems[$i], \\\\`
-        $env:PE_USER, \\\\`
-        $env:PE_PASS, \\\\`
-        $siteMap, \\\\`
+    $job = Start-Job -ScriptBlock $resizeJob -ArgumentList `
+        $siteName, `
+        $vmNames[$i], `
+        $delays[$i], `
+        $cpus[$i], `
+        $mems[$i], `
+        $env:PE_USER, `
+        $env:PE_PASS, `
+        $siteMap, `
         $logPath
     $jobs += $job
 }
 
 # ---------- Wait for all jobs to complete ----------
-Write-Host "\nWaiting for all resize jobs to finish..."
+Write-Host "`nWaiting for all resize jobs to finish..."
 $jobs | Wait-Job | Out-Null
 
 # ---------- Receive output from each job ----------
@@ -207,7 +208,7 @@ $jobs | ForEach-Object {
     Remove-Job $_
 }
 
-# ---------- New: Generate GitHub Actions Step Summary Table ----------
+# ---------- Generate GitHub Actions Step Summary Table ----------
 if ($env:GITHUB_STEP_SUMMARY) {
     if (Test-Path $logPath) {
         $lines = Get-Content $logPath
@@ -229,13 +230,13 @@ if ($env:GITHUB_STEP_SUMMARY) {
                 $newMem = $parts[5]
                 $status = $parts[6]
                 
-                # Format status with a nice icon/emoji matching your report requirements
+                # Format status into standard Capitalized text
                 $statusFormatted = "Unknown"
-                if ($status -like \"*successful*\") {
+                if ($status -like "*successful*") {
                     $statusFormatted = "Successful"
-                } elseif ($status -like \"*skipped*\") {
+                } elseif ($status -like "*skipped*") {
                     $statusFormatted = "Skipped"
-                } elseif ($status -like \"*VM Not Found*\") {
+                } elseif ($status -like "*VM Not Found*") {
                     $statusFormatted = "VM Not Found"
                 } else {
                     $statusFormatted = "Failed"
@@ -248,4 +249,4 @@ if ($env:GITHUB_STEP_SUMMARY) {
     }
 }
 
-Write-Host "\n===== All VMs processed. Log saved to $logPath ====="
+Write-Host "`n===== All VMs processed. Log saved to $logPath ====="
