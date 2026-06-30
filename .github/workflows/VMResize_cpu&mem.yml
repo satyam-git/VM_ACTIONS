@@ -21,4 +21,5 @@ jobs:
           PE_PASS: ${{ secrets.PE_Password }}
           INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
+          # The PowerShell script writes directly to GITHUB_STEP_SUMMARY environment variable
           & "$env:GITHUB_WORKSPACE\Scripts\VMResize_cpu&mem.ps1" -JsonInputs $env:INPUTS_JSON
