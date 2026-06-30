@@ -1,38 +1,26 @@
 param($JsonInputs)
 $data = $JsonInputs | ConvertFrom-Json
 
-# ---------- Helper: convert any numeric string to integer (with rounding) ----------
+# ---------- Helper: Convert to Integer ----------
 function Convert-ToInteger {
     param([string]$value)
     try {
         $num = [double]$value
-        $rounded = [math]::Round($num)
-        return [int]$rounded
-    } catch {
-        throw "Invalid number: '$value'."
-    }
+        return [int][math]::Round($num)
+    } catch { throw "Invalid number: '$value'." }
 }
 
-# ---------- Helper: expand a single value or a list to match VM count ----------
+# ---------- Helper: Expand Values ----------
 function Expand-Values {
     param([string[]]$vmList, [string]$inputValue, [string]$valueName)
     $vmCount = $vmList.Count
     if ($vmCount -eq 0) { return @() }
-
-    $values = if ([string]::IsNullOrWhiteSpace($inputValue)) { @() } else { 
-        $inputValue -split ',' | ForEach-Object { Convert-ToInteger -value $_.Trim() } 
-    }
-
-    if ($values.Count -eq 0) {
-        if ($valueName -eq "Delay") { return @(0) * $vmCount }
-        else { throw "No $valueName values provided." }
-    }
+    $values = if ([string]::IsNullOrWhiteSpace($inputValue)) { @() } else { $inputValue -split ',' | ForEach-Object { Convert-ToInteger -value $_.Trim() } }
+    if ($values.Count -eq 0 -and $valueName -eq "Delay") { return @(0) * $vmCount }
+    if ($values.Count -eq 0) { throw "No $valueName values provided." }
     if ($values.Count -eq 1) { return @($values[0]) * $vmCount }
-
     $result = @()
-    for ($i = 0; $i -lt $vmCount; $i++) {
-        $result += if ($i -lt $values.Count) { $values[$i] } else { $values[-1] }
-    }
+    for ($i = 0; $i -lt $vmCount; $i++) { $result += if ($i -lt $values.Count) { $values[$i] } else { $values[-1] } }
     return $result
 }
 
@@ -40,7 +28,7 @@ function Expand-Values {
 $logPath = Join-Path $env:GITHUB_WORKSPACE "data\resize_log.csv"
 if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
 
-# Initialize CSV with Headers (Fixed missing quote)
+# Initialize CSV with Headers (Enclosed in quotes to fix parser error)
 "SiteName,VMName,CurrentCPU,CurrentMemGB,NewCPU,NewMemGB,Status" | Out-File -FilePath $logPath -Encoding utf8
 
 $siteMap = @{ "Bangalore" = "192.168.136.50"; "Chennai" = "10.0.0.10"; "Pune" = "10.0.0.20" }
@@ -49,14 +37,14 @@ $cpus = Expand-Values -vmList $vmNames -inputValue $data.c1 -valueName "CPU"
 $mems = Expand-Values -vmList $vmNames -inputValue $data.m1 -valueName "Memory"
 $delays = Expand-Values -vmList $vmNames -inputValue $data.d1 -valueName "Delay"
 
-# ---------- Define the job script block ----------
+# ---------- Resize Job Definition ----------
 $resizeJob = {
     param($site, $vmName, $delayMin, $cpu, $memGB, $user, $pass, $siteMap, $logPath)
     $ip = $siteMap[$site]
     if ($delayMin -gt 0) { Start-Sleep -Seconds ($delayMin * 60) }
-
+    
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) { Add-PSSnapin NutanixCmdletsPSSnapin }
-
+    
     $securePass = $pass | ConvertTo-SecureString -AsPlainText -Force
     $Status = "failed"
     try {
@@ -84,7 +72,7 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
 $jobs | Wait-Job | Out-Null
 $jobs | ForEach-Object { Receive-Job $_; Remove-Job $_ }
 
-# ---------- Table Summary Print (Fixed syntax) ----------
+# ---------- Safe Table Summary Print ----------
 Write-Host "`n| Site | VM Name | Current CPU | Current Mem | New CPU | New Mem | Status |"
 Write-Host "|------|---------|-------------|-------------|---------|---------|--------|"
 Import-Csv -Path $logPath | ForEach-Object {
