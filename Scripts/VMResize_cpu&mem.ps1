@@ -112,7 +112,8 @@ $resizeJob = {
 
     $ip = $siteMap[$site]
     if (-not $ip) {
-        "$site,$vmName,$cpu,$memGB,$delayMin,ERROR: Site not mapped" | Out-File -FilePath $logPath -Append -Encoding utf8
+        # No site mapping – log with zeros for current values
+        "$site,$vmName,0,0,$cpu,$memGB,ERROR: Site not mapped" | Out-File -FilePath $logPath -Append -Encoding utf8
         return
     }
 
@@ -127,13 +128,17 @@ $resizeJob = {
         Add-PSSnapin NutanixCmdletsPSSnapin
     }
 
-    # ------------------ REPLACED PASSWORD CONVERSION ------------------
+    # Build SecureString manually
     $securePass = New-Object System.Security.SecureString
     foreach ($char in $pass.ToCharArray()) { $securePass.AppendChar($char) }
     $securePass.MakeReadOnly()
-    # ----------------------------------------------------------------
 
     $Status = "failed"
+    $CurrentCPU = 0
+    $CurrentMemGB = 0
+    $NewCPU = $cpu
+    $NewMemGB = $memGB
+
     try {
         Connect-NTNXCluster -Server $ip -UserName $user -Password $securePass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
 
@@ -147,6 +152,9 @@ $resizeJob = {
             $FinalCPU = if ($cpu -gt 0) { $cpu } else { $CurrentCPU }
             $TempMem = if ($memGB -gt 0) { $memGB } else { $CurrentMemGB }
             $FinalMemGB = if ($TempMem -lt 1) { 1 } else { $TempMem }
+
+            $NewCPU = $FinalCPU
+            $NewMemGB = $FinalMemGB
 
             if ($FinalCPU -eq $CurrentCPU -and $FinalMemGB -eq $CurrentMemGB) {
                 $Status = "skipped (no change)"
@@ -175,7 +183,8 @@ $resizeJob = {
         Disconnect-NTNXCluster -Servers $ip -ErrorAction SilentlyContinue
     }
 
-    "$site,$vmName,$cpu,$memGB,$delayMin,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
+    # Log: Site,VMName,CurrentCPU,CurrentMemGB,NewCPU,NewMemGB,Status
+    "$site,$vmName,$CurrentCPU,$CurrentMemGB,$NewCPU,$NewMemGB,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
     Write-Host "[$vmName] $Status"
 }
 
@@ -206,3 +215,20 @@ $jobs | ForEach-Object {
 }
 
 Write-Host "`n===== All VMs processed. Log saved to $logPath ====="
+
+# ---------- Read the log and display a summary table ----------
+if (Test-Path $logPath) {
+    $results = Import-Csv -Path $logPath
+    Write-Host "`n===== Summary Table ====="
+    $results | Sort-Object VMName | Format-Table -Property @(
+        @{Name='Site Name'; Expression={$_.Site}},
+        @{Name='VMName'; Expression={$_.VMName}},
+        @{Name='Current CPU'; Expression={$_.CurrentCPU}},
+        @{Name='Current Mem'; Expression={$_.CurrentMemGB}},
+        @{Name='New CPU'; Expression={$_.NewCPU}},
+        @{Name='New Mem'; Expression={$_.NewMemGB}},
+        @{Name='Status'; Expression={$_.Status}}
+    ) -AutoSize
+} else {
+    Write-Host "Log file not found – no summary available."
+}
