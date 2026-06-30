@@ -27,8 +27,6 @@ function Expand-Values {
     if ($vmCount -eq 0) { return @() }
 
     $values = if ([string]::IsNullOrWhiteSpace($inputValue)) {
-        # Default: if no input, use 0 for delay, or maybe we don't have a default for CPU/mem? We'll handle that later.
-        # For CPU/Mem, we cannot default to 0, so we'll throw if empty.
         @()
     } else {
         $inputValue -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | ForEach-Object {
@@ -37,9 +35,6 @@ function Expand-Values {
     }
 
     if ($values.Count -eq 0) {
-        # If no values given, we need to decide:
-        # - For Delay: default to 0
-        # - For CPU/Mem: throw an error because they are required.
         if ($valueName -eq "Delay") {
             return @(0) * $vmCount
         } else {
@@ -48,11 +43,9 @@ function Expand-Values {
     }
 
     if ($values.Count -eq 1) {
-        # Single value: replicate to all VMs
         return @($values[0]) * $vmCount
     }
 
-    # Multiple values: truncate or pad with the last value
     $result = @()
     for ($i = 0; $i -lt $vmCount; $i++) {
         if ($i -lt $values.Count) { $result += $values[$i] }
@@ -112,18 +105,15 @@ $resizeJob = {
 
     $ip = $siteMap[$site]
     if (-not $ip) {
-        # No site mapping – log with zeros for current values
         "$site,$vmName,0,0,$cpu,$memGB,ERROR: Site not mapped" | Out-File -FilePath $logPath -Append -Encoding utf8
         return
     }
 
-    # Wait for the delay (if any)
     if ($delayMin -gt 0) {
         Write-Host "[$vmName] Waiting $delayMin minute(s)..."
         Start-Sleep -Seconds ($delayMin * 60)
     }
 
-    # Load Nutanix snapin
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
         Add-PSSnapin NutanixCmdletsPSSnapin
     }
@@ -159,7 +149,6 @@ $resizeJob = {
             if ($FinalCPU -eq $CurrentCPU -and $FinalMemGB -eq $CurrentMemGB) {
                 $Status = "skipped (no change)"
             } else {
-                # Two‑strike shutdown
                 Write-Host "[$vmName] Attempt 1: ACPI shutdown..."
                 Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
                 Start-Sleep -Seconds 40
@@ -170,7 +159,6 @@ $resizeJob = {
                     Start-Sleep -Seconds 20
                 }
 
-                # Resize and power on
                 Write-Host "[$vmName] Applying: $FinalCPU CPU, $FinalMemGB GB RAM."
                 Set-NTNXVirtualMachine -Vmid $vm.uuid -NumVcpus $FinalCPU -MemoryMb ($FinalMemGB * 1024) -ErrorAction Stop | Out-Null
                 Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ON -ErrorAction Stop | Out-Null
@@ -219,6 +207,8 @@ Write-Host "`n===== All VMs processed. Log saved to $logPath ====="
 # ---------- Read the log and display a summary table ----------
 if (Test-Path $logPath) {
     $results = Import-Csv -Path $logPath
+
+    # --- Console output (format-table) ---
     Write-Host "`n===== Summary Table ====="
     $results | Sort-Object VMName | Format-Table -Property @(
         @{Name='Site Name'; Expression={$_.Site}},
@@ -229,6 +219,24 @@ if (Test-Path $logPath) {
         @{Name='New Mem'; Expression={$_.NewMemGB}},
         @{Name='Status'; Expression={$_.Status}}
     ) -AutoSize
+
+    # --- GitHub Step Summary (Markdown table) ---
+    $summary = @"
+## VM Resize Summary
+
+| Site Name | VMName | Current CPU | Current Mem | New CPU | New Mem | Status |
+|-----------|--------|-------------|-------------|---------|---------|--------|
+"@
+    foreach ($row in ($results | Sort-Object VMName)) {
+        $summary += "| $($row.Site) | $($row.VMName) | $($row.CurrentCPU) | $($row.CurrentMemGB) | $($row.NewCPU) | $($row.NewMemGB) | $($row.Status) |`n"
+    }
+
+    # Append to GitHub step summary
+    if ($env:GITHUB_STEP_SUMMARY) {
+        $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+        Write-Host "Summary also written to GitHub step summary."
+    }
+
 } else {
-    Write-Host "Log file not found – no summary available."
+    Write-Host "Log file not found - no summary available."
 }
