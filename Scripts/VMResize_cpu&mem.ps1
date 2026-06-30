@@ -139,8 +139,26 @@ $resizeJob = {
         if (-not $vm) {
             $Status = "VM Not Found"
         } else {
-            $CurrentCPU = [int]$vm.numVcpus
-            $CurrentMemGB = [int]($vm.memoryMb / 1024)
+            # ---- Robust retrieval of current CPU and memory ----
+            # Try to get numVcpus (case-insensitive)
+            $cpuProp = $vm.PSObject.Properties | Where-Object { $_.Name -match 'numvcpus' } | Select-Object -First 1
+            if ($cpuProp) { $CurrentCPU = [int]$cpuProp.Value } else { $CurrentCPU = 0 }
+
+            # Try to get memory in MB (try common property names)
+            $memProps = @('memoryMb', 'MemoryMb', 'memoryMB', 'MemoryMB', 'memory_mb')
+            $memValue = $null
+            foreach ($prop in $memProps) {
+                $p = $vm.PSObject.Properties | Where-Object { $_.Name -eq $prop } | Select-Object -First 1
+                if ($p) { $memValue = $p.Value; break }
+            }
+            if ($memValue -ne $null) {
+                $CurrentMemGB = [math]::Round([double]$memValue / 1024, 0)   # round to nearest integer GB
+            } else {
+                $CurrentMemGB = 0
+            }
+
+            # Debug output (will appear in job logs)
+            Write-Host "[$vmName] Detected: CPU=$CurrentCPU, Memory=${CurrentMemGB}GB"
 
             $FinalCPU = if ($cpu -gt 0) { $cpu } else { $CurrentCPU }
             $TempMem = if ($memGB -gt 0) { $memGB } else { $CurrentMemGB }
