@@ -86,6 +86,9 @@ $logPath = Join-Path $env:GITHUB_WORKSPACE "data\resize_log.csv"
 if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
 if (Test-Path $logPath) { Remove-Item $logPath }
 
+# Write CSV header once
+"Site,VMName,CurrentCPU,CurrentMemGB,NewCPU,NewMemGB,Status" | Out-File -FilePath $logPath -Append -Encoding utf8
+
 # ---------- Site mapping ----------
 $siteMap = @{
     "Bangalore" = "192.168.136.50"
