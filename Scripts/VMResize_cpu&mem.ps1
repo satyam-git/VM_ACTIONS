@@ -27,7 +27,8 @@ function Expand-Values {
     if ($vmCount -eq 0) { return @() }
 
     $values = if ([string]::IsNullOrWhiteSpace($inputValue)) {
-        # Default: if no input, use 0 for delay.
+        # Default: if no input, use 0 for delay, or maybe we don't have a default for CPU/mem? We'll handle that later.
+        # For CPU/Mem, we cannot default to 0, so we'll throw if empty.
         @()
     } else {
         $inputValue -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | ForEach-Object {
@@ -36,6 +37,9 @@ function Expand-Values {
     }
 
     if ($values.Count -eq 0) {
+        # If no values given, we need to decide:
+        # - For Delay: default to 0
+        # - For CPU/Mem: throw an error because they are required.
         if ($valueName -eq "Delay") {
             return @(0) * $vmCount
         } else {
@@ -57,7 +61,7 @@ function Expand-Values {
     return $result
 }
 
-# ---------- Parse VM list (with array-preservation fix) ----------
+# ---------- Parse VM list (Ensures collection is always an array) ----------
 $vmNames = @(($data.v1 -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
 if ($vmNames.Count -eq 0) {
     throw "No VM names provided."
@@ -100,7 +104,7 @@ $siteName = $data.s1
 if (-not $siteMap.ContainsKey($siteName)) {
     throw "Site '$siteName' not found in mapping. Available: $($siteMap.Keys -join ', ')"
 }
-$ClusterIP = $siteMap[$siteName]
+$ClusterIP = $siteMap[$siteName]   # kept for logging structure/consistency
 
 # ---------- Define the job script block ----------
 $resizeJob = {
@@ -108,6 +112,7 @@ $resizeJob = {
 
     $ip = $siteMap[$site]
     if (-not $ip) {
+        # Enhanced format: SiteName,VMName,CurrentCPU,CurrentMem,NewCPU,NewMem,Status
         "$site,$vmName,N/A,N/A,$cpu,$memGB,ERROR: Site not mapped" | Out-File -FilePath $logPath -Append -Encoding utf8
         return
     }
@@ -122,9 +127,8 @@ $resizeJob = {
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
         Add-PSSnapin NutanixCmdletsPSSnapin
     }
-    $securePass = New-Object System.Security.SecureString
-    foreach ($char in $pass.ToCharArray()) { $securePass.AppendChar($char) }
-    $securePass.MakeReadOnly()
+
+    $securePass = $pass | ConvertTo-SecureString -AsPlainText -Force
     $Status = "failed"
     $CurrentCPU = "N/A"
     $CurrentMemGB = "N/A"
@@ -139,7 +143,24 @@ $resizeJob = {
             $Status = "VM Not Found"
         } else {
             $CurrentCPU = [int]$vm.numVcpus
-            $CurrentMemGB = [int]($vm.memoryMb / 1024)
+            
+            # Robust property resolution probing for Nutanix Cmdlets versions
+            $memMib = 0
+            if ($vm.memorySizeMib -ne $null -and $vm.memorySizeMib -ne 0) {
+                $memMib = $vm.memorySizeMib
+            } elseif ($vm.memory_size_mib -ne $null -and $vm.memory_size_mib -ne 0) {
+                $memMib = $vm.memory_size_mib
+            } elseif ($vm.memoryMb -ne $null -and $vm.memoryMb -ne 0) {
+                $memMib = $vm.memoryMb
+            } elseif ($vm.memoryMib -ne $null -and $vm.memoryMib -ne 0) {
+                $memMib = $vm.memoryMib
+            } elseif ($vm.memoryCapacityInBytes -ne $null -and $vm.memoryCapacityInBytes -ne 0) {
+                $memMib = $vm.memoryCapacityInBytes / 1MB
+            }
+            $CurrentMemGB = [int]($memMib / 1024)
+            if ($CurrentMemGB -eq 0 -and $memMib -gt 0) {
+                $CurrentMemGB = 1
+            }
 
             $FinalCPU = if ($cpu -gt 0) { $cpu } else { $CurrentCPU }
             $TempMem = if ($memGB -gt 0) { $memGB } else { $CurrentMemGB }
@@ -203,12 +224,12 @@ $jobs | ForEach-Object {
     Remove-Job $_
 }
 
-# ---------- Generate GitHub Actions Step Summary Table ----------
+# ---------- New: Generate GitHub Actions Step Summary Table ----------
 if ($env:GITHUB_STEP_SUMMARY) {
     if (Test-Path $logPath) {
         $lines = Get-Content $logPath
         $md = @()
-        $md += "### 🚀 Nutanix VM Resize Summary"
+        $md += "### Nutanix VM Resize Summary"
         $md += ""
         $md += "| Site Name | VMName | Current CPU | Current Mem | New CPU | New Mem | Status |"
         $md += "| :--- | :--- | :---: | :---: | :---: | :---: | :--- |"
@@ -225,7 +246,7 @@ if ($env:GITHUB_STEP_SUMMARY) {
                 $newMem = $parts[5]
                 $status = $parts[6]
                 
-                # Format status with a nice text style matching your report requirements
+                # Format status with a nice icon/emoji matching your report requirements
                 $statusFormatted = "Unknown"
                 if ($status -like "*successful*") {
                     $statusFormatted = "Successful"
