@@ -27,8 +27,7 @@ function Expand-Values {
     if ($vmCount -eq 0) { return @() }
 
     $values = if ([string]::IsNullOrWhiteSpace($inputValue)) {
-        # Default: if no input, use 0 for delay, or maybe we don't have a default for CPU/mem? We'll handle that later.
-        # For CPU/Mem, we cannot default to 0, so we'll throw if empty.
+        # Default: if no input, use 0 for delay.
         @()
     } else {
         $inputValue -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | ForEach-Object {
@@ -37,9 +36,6 @@ function Expand-Values {
     }
 
     if ($values.Count -eq 0) {
-        # If no values given, we need to decide:
-        # - For Delay: default to 0
-        # - For CPU/Mem: throw an error because they are required.
         if ($valueName -eq "Delay") {
             return @(0) * $vmCount
         } else {
@@ -61,8 +57,8 @@ function Expand-Values {
     return $result
 }
 
-# ---------- Parse VM list ----------
-$vmNames = ($data.v1 -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+# ---------- Parse VM list (with array-preservation fix) ----------
+$vmNames = @(($data.v1 -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
 if ($vmNames.Count -eq 0) {
     throw "No VM names provided."
 }
@@ -104,7 +100,7 @@ $siteName = $data.s1
 if (-not $siteMap.ContainsKey($siteName)) {
     throw "Site '$siteName' not found in mapping. Available: $($siteMap.Keys -join ', ')"
 }
-$ClusterIP = $siteMap[$siteName]   # not directly used but kept for consistency
+$ClusterIP = $siteMap[$siteName]
 
 # ---------- Define the job script block ----------
 $resizeJob = {
@@ -112,7 +108,6 @@ $resizeJob = {
 
     $ip = $siteMap[$site]
     if (-not $ip) {
-        # Enhanced logging with fallback placeholders
         "$site,$vmName,N/A,N/A,$cpu,$memGB,ERROR: Site not mapped" | Out-File -FilePath $logPath -Append -Encoding utf8
         return
     }
@@ -142,7 +137,6 @@ $resizeJob = {
         if (-not $vm) {
             $Status = "VM Not Found"
         } else {
-            # Capture current settings before modifying
             $CurrentCPU = [int]$vm.numVcpus
             $CurrentMemGB = [int]($vm.memoryMb / 1024)
 
@@ -177,7 +171,7 @@ $resizeJob = {
         Disconnect-NTNXCluster -Servers $ip -ErrorAction SilentlyContinue
     }
 
-    # Enhanced CSV write including: SiteName,VMName,CurrentCPU,CurrentMem,NewCPU,NewMem,Status
+    # Enhanced log row with original and new sizing details
     "$site,$vmName,$CurrentCPU,$CurrentMemGB,$FinalCPU,$FinalMemGB,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
     Write-Host "[$vmName] $Status"
 }
@@ -230,7 +224,7 @@ if ($env:GITHUB_STEP_SUMMARY) {
                 $newMem = $parts[5]
                 $status = $parts[6]
                 
-                # Format status into standard Capitalized text
+                # Format status with a nice text style matching your report requirements
                 $statusFormatted = "Unknown"
                 if ($status -like "*successful*") {
                     $statusFormatted = "Successful"
