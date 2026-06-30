@@ -1,17 +1,3 @@
-
-# ===== Enhancement for additional input sets =====
-# The script should iterate over these sets:
-# Set1 : s1,v1,c1,m1,d1
-# Set2 : s2,v2,c2,m2,d2
-# Set3 : s3,v3,c3,m3,d3
-# Recommended implementation:
-# foreach ($idx in 1..3) {
-#   Read s$idx,v$idx,c$idx,m$idx,d$idx
-#   Skip empty VM list
-#   Execute the existing resize logic unchanged
-# }
-# ================================================
-
 param($JsonInputs)
 $data = $JsonInputs | ConvertFrom-Json
 
