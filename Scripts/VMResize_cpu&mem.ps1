@@ -92,6 +92,8 @@ Write-Host "Start time: $(Get-Date -Format 'HH:mm:ss')`n"
 $logPath = Join-Path $env:GITHUB_WORKSPACE "data\resize_log.csv"
 if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
 if (Test-Path $logPath) { Remove-Item $logPath }
+SiteName,VMName,CurrentCPU,CurrentMemGB,NewCPU,NewMemGB,Status" |
+Out-File -FilePath $logPath -Encoding utf8
 
 # ---------- Site mapping ----------
 $siteMap = @{
@@ -175,7 +177,17 @@ $resizeJob = {
         Disconnect-NTNXCluster -Servers $ip -ErrorAction SilentlyContinue
     }
 
-    "$site,$vmName,$CurrentCPU,$CurrentMemGB,$FinalCPU,$FinalMemGB,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
+    $line = "$site,$vmName,$CurrentCPU,$CurrentMemGB,$FinalCPU,$FinalMemGB,$Status"
+
+$mutex = New-Object System.Threading.Mutex($false, "ResizeLogMutex")
+$mutex.WaitOne()
+
+try{
+    Add-Content -Path $logPath -Value $line
+}
+finally{
+    $mutex.ReleaseMutex()
+}
     Write-Host "[$vmName] $Status"
 }
 
@@ -215,13 +227,34 @@ if (Test-Path $logPath) {
 |-----------|----------|-------------|------------------|----------|--------------|--------|
 "@
 
-    Get-Content $logPath | ForEach-Object {
-        $c = $_ -split ","
-        if ($c.Count -ge 7) {
-            $summary += "`n| $($c[0]) | $($c[1]) | $($c[2]) | $($c[3]) | $($c[4]) | $($c[5]) | $($c[6]) |"
-        }
+    # Populate the VM table
+    Import-Csv $logPath | ForEach-Object {
+
+        $summary += "`n| $($_.SiteName) | $($_.VMName) | $($_.CurrentCPU) | $($_.CurrentMemGB) | $($_.NewCPU) | $($_.NewMemGB) | $($_.Status) |"
+
     }
 
+    # Calculate execution summary
+    $data = Import-Csv $logPath
+
+    $total = $data.Count
+    $success = ($data | Where-Object Status -eq "successful").Count
+    $failed = ($data | Where-Object Status -like "failed*").Count
+    $skipped = ($data | Where-Object Status -like "skipped*").Count
+    $notFound = ($data | Where-Object Status -eq "VM Not Found").Count
+
+    # Append execution summary
+    $summary += @"
+
+## Execution Summary
+
+| Total | Successful | Failed | Skipped | VM Not Found |
+|------:|-----------:|-------:|---------:|-------------:|
+| $total | $success | $failed | $skipped | $notFound |
+
+"@
+
+    # Write to GitHub Summary
     $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 }
 
