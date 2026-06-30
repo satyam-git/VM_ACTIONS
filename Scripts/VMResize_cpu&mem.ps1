@@ -127,7 +127,12 @@ $resizeJob = {
         Add-PSSnapin NutanixCmdletsPSSnapin
     }
 
-    $securePass = $pass | ConvertTo-SecureString -AsPlainText -Force
+    # ------------------ REPLACED PASSWORD CONVERSION ------------------
+    $securePass = New-Object System.Security.SecureString
+    foreach ($char in $pass.ToCharArray()) { $securePass.AppendChar($char) }
+    $securePass.MakeReadOnly()
+    # ----------------------------------------------------------------
+
     $Status = "failed"
     try {
         Connect-NTNXCluster -Server $ip -UserName $user -Password $securePass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
