@@ -54,45 +54,6 @@ function Expand-Values {
     return $result
 }
 
-# ---------- Helper: extract CPU from VM object ----------
-function Get-VMCPU {
-    param($vm)
-    $cpuProp = $vm.PSObject.Properties | Where-Object { $_.Name -match 'numvcpus' } | Select-Object -First 1
-    if ($cpuProp) {
-        try { return [int]$cpuProp.Value } catch { return 0 }
-    }
-    return 0
-}
-
-# ---------- Helper: extract Memory in GB from VM object ----------
-function Get-VMMemoryGB {
-    param($vm)
-    # List of common property names for memory in MB
-    $commonNames = @('memoryMb', 'MemoryMb', 'memoryMB', 'MemoryMB', 'memory_mb', 'Memory_MB', 'memorySizeInMB')
-    foreach ($name in $commonNames) {
-        $val = $vm.$name
-        if ($val -ne $null) {
-            try {
-                $memBytes = [double]$val
-                if ($memBytes -gt 0) {
-                    return [math]::Round($memBytes / 1024, 0)
-                }
-            } catch {}
-        }
-    }
-    # Fallback: scan all properties for 'memory' and numeric value
-    $memProps = $vm.PSObject.Properties | Where-Object { $_.Name -match 'memory' -and $_.Value -is [numeric] }
-    foreach ($p in $memProps) {
-        try {
-            $val = [double]$p.Value
-            if ($val -gt 0) {
-                return [math]::Round($val / 1024, 0)
-            }
-        } catch {}
-    }
-    return 0
-}
-
 # ---------- Parse VM list ----------
 $vmNames = ($data.v1 -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
 if ($vmNames.Count -eq 0) {
@@ -145,6 +106,43 @@ $ClusterIP = $siteMap[$siteName]   # not directly used but kept for consistency
 $resizeJob = {
     param($site, $vmName, $delayMin, $cpu, $memGB, $user, $pass, $siteMap, $logPath)
 
+    # ---- Helper functions defined inside the job ----
+    function Get-VMCPU {
+        param($vm)
+        $cpuProp = $vm.PSObject.Properties | Where-Object { $_.Name -match 'numvcpus' } | Select-Object -First 1
+        if ($cpuProp) {
+            try { return [int]$cpuProp.Value } catch { return 0 }
+        }
+        return 0
+    }
+
+    function Get-VMMemoryGB {
+        param($vm)
+        $commonNames = @('memoryMb', 'MemoryMb', 'memoryMB', 'MemoryMB', 'memory_mb', 'Memory_MB', 'memorySizeInMB')
+        foreach ($name in $commonNames) {
+            $val = $vm.$name
+            if ($val -ne $null) {
+                try {
+                    $memBytes = [double]$val
+                    if ($memBytes -gt 0) {
+                        return [math]::Round($memBytes / 1024, 0)
+                    }
+                } catch {}
+            }
+        }
+        $memProps = $vm.PSObject.Properties | Where-Object { $_.Name -match 'memory' -and $_.Value -is [numeric] }
+        foreach ($p in $memProps) {
+            try {
+                $val = [double]$p.Value
+                if ($val -gt 0) {
+                    return [math]::Round($val / 1024, 0)
+                }
+            } catch {}
+        }
+        return 0
+    }
+    # ---- End helpers ----
+
     $ip = $siteMap[$site]
     if (-not $ip) {
         "$site,$vmName,0,0,$cpu,$memGB,ERROR: Site not mapped" | Out-File -FilePath $logPath -Append -Encoding utf8
@@ -178,11 +176,8 @@ $resizeJob = {
         if (-not $vm) {
             $Status = "VM Not Found"
         } else {
-            # ---- Robust retrieval of current CPU and memory ----
             $CurrentCPU = Get-VMCPU -vm $vm
             $CurrentMemGB = Get-VMMemoryGB -vm $vm
-
-            # Debug output (will appear in job logs)
             Write-Host "[$vmName] Detected: CPU=$CurrentCPU, Memory=${CurrentMemGB}GB"
 
             $FinalCPU = if ($cpu -gt 0) { $cpu } else { $CurrentCPU }
@@ -217,7 +212,6 @@ $resizeJob = {
         Disconnect-NTNXCluster -Servers $ip -ErrorAction SilentlyContinue
     }
 
-    # Log: Site,VMName,CurrentCPU,CurrentMemGB,NewCPU,NewMemGB,Status
     "$site,$vmName,$CurrentCPU,$CurrentMemGB,$NewCPU,$NewMemGB,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
     Write-Host "[$vmName] $Status"
 }
