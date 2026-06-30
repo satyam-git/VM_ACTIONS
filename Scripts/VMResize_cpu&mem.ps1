@@ -86,9 +86,6 @@ $logPath = Join-Path $env:GITHUB_WORKSPACE "data\resize_log.csv"
 if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
 if (Test-Path $logPath) { Remove-Item $logPath }
 
-# Write CSV header once
-"Site,VMName,CurrentCPU,CurrentMemGB,NewCPU,NewMemGB,Status" | Out-File -FilePath $logPath -Append -Encoding utf8
-
 # ---------- Site mapping ----------
 $siteMap = @{
     "Bangalore" = "192.168.136.50"
@@ -100,52 +97,15 @@ $siteName = $data.s1
 if (-not $siteMap.ContainsKey($siteName)) {
     throw "Site '$siteName' not found in mapping. Available: $($siteMap.Keys -join ', ')"
 }
-$ClusterIP = $siteMap[$siteName]   # not directly used but kept for consistency
 
 # ---------- Define the job script block ----------
 $resizeJob = {
     param($site, $vmName, $delayMin, $cpu, $memGB, $user, $pass, $siteMap, $logPath)
 
-    # ---- Helper functions defined inside the job ----
-    function Get-VMCPU {
-        param($vm)
-        $cpuProp = $vm.PSObject.Properties | Where-Object { $_.Name -match 'numvcpus' } | Select-Object -First 1
-        if ($cpuProp) {
-            try { return [int]$cpuProp.Value } catch { return 0 }
-        }
-        return 0
-    }
-
-    function Get-VMMemoryGB {
-        param($vm)
-        $commonNames = @('memoryMb', 'MemoryMb', 'memoryMB', 'MemoryMB', 'memory_mb', 'Memory_MB', 'memorySizeInMB')
-        foreach ($name in $commonNames) {
-            $val = $vm.$name
-            if ($val -ne $null) {
-                try {
-                    $memBytes = [double]$val
-                    if ($memBytes -gt 0) {
-                        return [math]::Round($memBytes / 1024, 0)
-                    }
-                } catch {}
-            }
-        }
-        $memProps = $vm.PSObject.Properties | Where-Object { $_.Name -match 'memory' -and $_.Value -is [numeric] }
-        foreach ($p in $memProps) {
-            try {
-                $val = [double]$p.Value
-                if ($val -gt 0) {
-                    return [math]::Round($val / 1024, 0)
-                }
-            } catch {}
-        }
-        return 0
-    }
-    # ---- End helpers ----
-
     $ip = $siteMap[$site]
+   
     if (-not $ip) {
-        "$site,$vmName,0,0,$cpu,$memGB,ERROR: Site not mapped" | Out-File -FilePath $logPath -Append -Encoding utf8
+        "$site,$vmName,$cpu,$memGB,$delayMin,ERROR: Site not mapped" | Out-File -FilePath $logPath -Append -Encoding utf8
         return
     }
 
@@ -158,34 +118,20 @@ $resizeJob = {
         Add-PSSnapin NutanixCmdletsPSSnapin
     }
 
-    # Build SecureString manually
-    $securePass = New-Object System.Security.SecureString
-    foreach ($char in $pass.ToCharArray()) { $securePass.AppendChar($char) }
-    $securePass.MakeReadOnly()
-
+    $securePass = $pass | ConvertTo-SecureString -AsPlainText -Force
     $Status = "failed"
-    $CurrentCPU = 0
-    $CurrentMemGB = 0
-    $NewCPU = $cpu
-    $NewMemGB = $memGB
-
     try {
         Connect-NTNXCluster -Server $ip -UserName $user -Password $securePass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
-
         $vm = Get-NTNXVM | Where-Object { $_.vmName -eq $vmName }
         if (-not $vm) {
             $Status = "VM Not Found"
         } else {
-            $CurrentCPU = Get-VMCPU -vm $vm
-            $CurrentMemGB = Get-VMMemoryGB -vm $vm
-            Write-Host "[$vmName] Detected: CPU=$CurrentCPU, Memory=${CurrentMemGB}GB"
+            $CurrentCPU = [int]$vm.numVcpus
+            $CurrentMemGB = [int]($vm.memoryMb / 1024)
 
             $FinalCPU = if ($cpu -gt 0) { $cpu } else { $CurrentCPU }
             $TempMem = if ($memGB -gt 0) { $memGB } else { $CurrentMemGB }
             $FinalMemGB = if ($TempMem -lt 1) { 1 } else { $TempMem }
-
-            $NewCPU = $FinalCPU
-            $NewMemGB = $FinalMemGB
 
             if ($FinalCPU -eq $CurrentCPU -and $FinalMemGB -eq $CurrentMemGB) {
                 $Status = "skipped (no change)"
@@ -212,7 +158,7 @@ $resizeJob = {
         Disconnect-NTNXCluster -Servers $ip -ErrorAction SilentlyContinue
     }
 
-    "$site,$vmName,$CurrentCPU,$CurrentMemGB,$NewCPU,$NewMemGB,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
+    "$site,$vmName,$cpu,$memGB,$delayMin,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
     Write-Host "[$vmName] $Status"
 }
 
@@ -243,40 +189,3 @@ $jobs | ForEach-Object {
 }
 
 Write-Host "`n===== All VMs processed. Log saved to $logPath ====="
-
-# ---------- Read the log and display a summary table ----------
-if (Test-Path $logPath) {
-    $results = Import-Csv -Path $logPath
-
-    # --- Console output (format-table) ---
-    Write-Host "`n===== Summary Table ====="
-    $results | Sort-Object VMName | Format-Table -Property @(
-        @{Name='Site Name'; Expression={$_.Site}},
-        @{Name='VMName'; Expression={$_.VMName}},
-        @{Name='Current CPU'; Expression={$_.CurrentCPU}},
-        @{Name='Current Mem'; Expression={$_.CurrentMemGB}},
-        @{Name='New CPU'; Expression={$_.NewCPU}},
-        @{Name='New Mem'; Expression={$_.NewMemGB}},
-        @{Name='Status'; Expression={$_.Status}}
-    ) -AutoSize
-
-    # --- GitHub Step Summary (Markdown table) ---
-    $summary = @"
-## VM Resize Summary
-
-| Site Name | VMName | Current CPU | Current Mem | New CPU | New Mem | Status |
-|-----------|--------|-------------|-------------|---------|---------|--------|
-"@
-    foreach ($row in ($results | Sort-Object VMName)) {
-        $summary += "| $($row.Site) | $($row.VMName) | $($row.CurrentCPU) | $($row.CurrentMemGB) | $($row.NewCPU) | $($row.NewMemGB) | $($row.Status) |`n"
-    }
-
-    # Append to GitHub step summary
-    if ($env:GITHUB_STEP_SUMMARY) {
-        $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-        Write-Host "Summary also written to GitHub step summary."
-    }
-
-} else {
-    Write-Host "Log file not found - no summary available."
-}
