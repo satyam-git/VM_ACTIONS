@@ -3,21 +3,17 @@ name: Nutanix VM Disk Resizing
 on:
   workflow_dispatch:
     inputs:
-      site_name:
-        description: "Site Name"
+      # --- SET 1 ---
+      pe_ip:
+        description: "1: Prism Element / CVM IP"
         required: true
-        default: Banglore
-        type: choice
-        options:
-          - Banglore
-          - Chennai
-          - CPune
+        type: string
       vmname:
-        description: "VM Name"
+        description: "1: VM Name"
         required: true
         type: string
       disk_action:
-        description: "Disk Action"
+        description: "1: Disk Action"
         required: true
         default: add
         type: choice
@@ -25,11 +21,11 @@ on:
           - add
           - extend
       SizeGB:
-        description: "Target Disk Size (GB)"
+        description: "1: Disk Size in GB"
         required: true
         type: string
       DiskAddr:
-        description: "Disk Address (Required for extend)"
+        description: "1: Disk Address"
         required: true
         default: none
         type: choice
@@ -41,12 +37,59 @@ on:
           - scsi.3
           - scsi.4
       GuestIP:
-        description: "Windows Guest VM IP"
+        description: "1: Windows Guest IP"
         required: true
         type: string
       DriveLetter:
-        description: "Drive Letter (e.g. E)"
+        description: "1: Drive Letter"
         required: true
+        type: string
+
+      # --- SET 2 (Optional) ---
+      pe_ip2:
+        description: "2: Prism Element / CVM IP (Optional)"
+        required: false
+        default: ""
+        type: string
+      vmname2:
+        description: "2: VM Name (Optional)"
+        required: false
+        default: ""
+        type: string
+      disk_action2:
+        description: "2: Disk Action (Optional)"
+        required: false
+        default: add
+        type: choice
+        options:
+          - add
+          - extend
+      SizeGB2:
+        description: "2: Disk Size in GB (Optional)"
+        required: false
+        default: ""
+        type: string
+      DiskAddr2:
+        description: "2: Disk Address (Optional)"
+        required: false
+        default: none
+        type: choice
+        options:
+          - none
+          - scsi.0
+          - scsi.1
+          - scsi.2
+          - scsi.3
+          - scsi.4
+      GuestIP2:
+        description: "2: Windows Guest IP (Optional)"
+        required: false
+        default: ""
+        type: string
+      DriveLetter2:
+        description: "2: Drive Letter (Optional)"
+        required: false
+        default: ""
         type: string
 
 jobs:
@@ -54,8 +97,7 @@ jobs:
     runs-on: self-hosted
 
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Install Posh-SSH
         shell: powershell
@@ -69,7 +111,7 @@ jobs:
         shell: powershell
         run: |
           try {
-            # Ensure the self-hosted runner trusts all Guest VM connections
+            # Bypass IP restriction by adding target guest IP address to the runner's TrustedHosts
             Set-Item WSMan:\localhost\Client\TrustedHosts -Value "*" -Force
             Write-Host "WinRM TrustedHosts configured to trust guest IPs successfully."
           } catch {
@@ -83,6 +125,19 @@ jobs:
           PE_PASSWORD: ${{ secrets.PE_PASSWORD }}
           LOCAL_USERNAME: ${{ secrets.LOCAL_USERNAME }}
           LOCAL_PASSWORD: ${{ secrets.LOCAL_PASSWORD }}
-          INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
-          & "$env:GITHUB_WORKSPACE\Scripts\Nutanix VM Resize Disk.ps1" -JsonInputs $env:INPUTS_JSON
+          & "$env:GITHUB_WORKSPACE\Scripts\Nutanix VM Resize Disk.ps1" `
+            -pe_ip "${{ inputs.pe_ip }}" `
+            -vmname "${{ inputs.vmname }}" `
+            -disk_action "${{ inputs.disk_action }}" `
+            -SizeGB "${{ inputs.SizeGB }}" `
+            -DiskAddr "${{ inputs.DiskAddr }}" `
+            -GuestIP "${{ inputs.GuestIP }}" `
+            -DriveLetter "${{ inputs.DriveLetter }}" `
+            -pe_ip2 "${{ inputs.pe_ip2 }}" `
+            -vmname2 "${{ inputs.vmname2 }}" `
+            -disk_action2 "${{ inputs.disk_action2 }}" `
+            -SizeGB2 "${{ inputs.SizeGB2 }}" `
+            -DiskAddr2 "${{ inputs.DiskAddr2 }}" `
+            -GuestIP2 "${{ inputs.GuestIP2 }}" `
+            -DriveLetter2 "${{ inputs.DriveLetter2 }}"
