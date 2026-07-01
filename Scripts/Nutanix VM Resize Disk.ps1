@@ -1,286 +1,255 @@
-param($JsonInputs)
-$data = $JsonInputs | ConvertFrom-Json
+param(
+    # Set 1 Inputs
+    [Parameter(Mandatory = $true)]
+    [string]$pe_ip,
 
-# ---------- Helper: convert any numeric string to integer (with rounding) ----------
-function Convert-ToInteger {
-    param([string]$value)
-    try {
-        $num = [double]$value
-        $rounded = [math]::Round($num)
-        if ($num -ne $rounded) {
-            Write-Warning "Value '$value' is not an integer. It will be rounded to $rounded."
-        }
-        return [int]$rounded
-    } catch {
-        throw "Invalid number: '$value'. Please provide an integer (e.g., 2, 4, 8)."
-    }
-}
+    [Parameter(Mandatory = $true)]
+    [string]$vmname,
 
-# ---------- Helper: expand a single value or a list to match VM count ----------
-function Expand-Value {
+    [Parameter(Mandatory = $true)]
+    [ValidateSet("add","extend")]
+    [string]$disk_action,
+
+    [Parameter(Mandatory = $true)]
+    [string]$SizeGB,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateSet("none","scsi.0","scsi.1","scsi.2","scsi.3","scsi.4")]
+    [string]$DiskAddr = "none",
+
+    [Parameter(Mandatory = $true)]
+    [string]$GuestIP,
+
+    [Parameter(Mandatory = $true)]
+    [string]$DriveLetter,
+
+    # Set 2 Inputs (Optional)
+    [Parameter(Mandatory = $false)]
+    [string]$pe_ip2 = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$vmname2 = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$disk_action2 = "add",
+
+    [Parameter(Mandatory = $false)]
+    [string]$SizeGB2 = "",
+
+    [Parameter(Mandatory = $false)]
+    [ValidateSet("none","scsi.0","scsi.1","scsi.2","scsi.3","scsi.4")]
+    [string]$DiskAddr2 = "none",
+
+    [Parameter(Mandatory = $false)]
+    [string]$GuestIP2 = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$DriveLetter2 = ""
+)
+
+$ErrorActionPreference = "Stop"
+
+Write-Host "====================================="
+Write-Host "Nutanix Disk Provisioning Started"
+Write-Host "====================================="
+
+Import-Module Posh-SSH -ErrorAction Stop
+
+# --- Environmental & Parameter Sanity Checks ---
+if ([string]::IsNullOrWhiteSpace($env:PE_USERNAME)) { throw "PE_USERNAME secret not found" }
+if ([string]::IsNullOrWhiteSpace($env:PE_PASSWORD)) { throw "PE_PASSWORD secret not found" }
+if ([string]::IsNullOrWhiteSpace($env:LOCAL_USERNAME)) { throw "LOCAL_USERNAME secret not found" }
+if ([string]::IsNullOrWhiteSpace($env:LOCAL_PASSWORD)) { throw "LOCAL_PASSWORD secret not found" }
+
+# Helper function to execute the main provisioning logic
+function Invoke-DiskProvisioning {
     param(
-        [string[]]$vmList,
-        [string]$inputValue,
-        [string]$valueName   # e.g., "CPU", "Memory", "Delay"
+        [string]$current_pe_ip,
+        [string]$current_vmname,
+        [string]$current_disk_action,
+        [string]$current_SizeGB,
+        [string]$current_DiskAddr,
+        [string]$current_GuestIP,
+        [string]$current_DriveLetter
     )
-    $vmCount = $vmList.Count
-    if ($vmCount -eq 0) { return @() }
 
-    $values = if ([string]::IsNullOrWhiteSpace($inputValue)) {
-        @()
-    } else {
-        $inputValue -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | ForEach-Object {
-            Convert-ToInteger -value $_
-        }
+    Write-Host "--------------------------------------------------------"
+    Write-Host "Running provisioning for $current_vmname on $current_pe_ip..."
+    Write-Host "--------------------------------------------------------"
+
+    if ($current_disk_action -eq "extend" -and $current_DiskAddr -eq "none") {
+        throw "DiskAddr is mandatory when disk_action=extend"
     }
 
-    if ($values.Count -eq 0) {
-        if ($valueName -eq "Delay") {
-            return @(0) * $vmCount
-        } else {
-            throw "No $valueName values provided. Please specify $valueName for each VM."
-        }
-    }
-
-    if ($values.Count -eq 1) {
-        return @($values[0]) * $vmCount
-    }
-
-    $result = @()
-    for ($i = 0; $i -lt $vmCount; $i++) {
-        if ($i -lt $values.Count) { $result += $values[$i] }
-        else { $result += $values[-1] }
-    }
-    return $result
-}
-
-# ---------- Prepare logging ----------
-$logPath = Join-Path $env:GITHUB_WORKSPACE "data\resize_log.csv"
-if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
-if (Test-Path $logPath) { Remove-Item $logPath }
-
-# ---------- Site mapping ----------
-$siteMap = @{
-    "Banglore" = "192.168.136.50"
-    "Chennai"  = "10.0.0.10"
-    "CPune"    = "10.0.0.20"
-}
-
-# ---------- Define the job script block ----------
-$resizeJob = {
-    param($site, $vmName, $delayMin, $cpu, $memGB, $user, $pass, $siteMap, $logPath)
-
-    $ip = $siteMap[$site]
-    if (-not $ip) {
-        "$site,$vmName,N/A,N/A,$cpu,$memGB,ERROR: Site not mapped" | Out-File -FilePath $logPath -Append -Encoding utf8
-        return
-    }
-
-    if ($delayMin -gt 0) {
-        Write-Output "[$vmName] Waiting $delayMin minute(s)..."
-        Start-Sleep -Seconds ($delayMin * 60)
-    }
-
-    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
-        Add-PSSnapin NutanixCmdletsPSSnapin
-    }
-
-    $creds = New-Object System.Security.SecureString
-    foreach ($char in $pass.ToCharArray()) { $creds.AppendChar($char) }
-    $creds.MakeReadOnly()
-    $Status = "failed"
-    $CurrentCPU = "N/A"
-    $CurrentMemGB = "N/A"
-    $FinalCPU = $cpu
-    $FinalMemGB = $memGB
-
+    # --- Dynamic TrustedHosts Registration ---
     try {
-        Connect-NTNXCluster -Server $ip -UserName $user -Password $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
-
-        $vm = Get-NTNXVM | Where-Object { $_.vmName -eq $vmName }
-        if (-not $vm) {
-            $Status = "VM Not Found"
-        } else {
-            $CurrentCPU = [int]$vm.numVcpus
-            
-            $memMib = 0
-            if ($vm.memorySizeMib -ne $null -and $vm.memorySizeMib -ne 0) {
-                $memMib = $vm.memorySizeMib
-            } elseif ($vm.memory_size_mib -ne $null -and $vm.memory_size_mib -ne 0) {
-                $memMib = $vm.memory_size_mib
-            } elseif ($vm.memoryMb -ne $null -and $vm.memoryMb -ne 0) {
-                $memMib = $vm.memoryMb
-            } elseif ($vm.memoryMib -ne $null -and $vm.memoryMib -ne 0) {
-                $memMib = $vm.memoryMib
-            } elseif ($vm.memoryCapacityInBytes -ne $null -and $vm.memoryCapacityInBytes -ne 0) {
-                $memMib = $vm.memoryCapacityInBytes / 1MB
-            }
-            $CurrentMemGB = [int]($memMib / 1024)
-            if ($CurrentMemGB -eq 0 -and $memMib -gt 0) {
-                $CurrentMemGB = 1
-            }
-
-            $FinalCPU = if ($cpu -gt 0) { $cpu } else { $CurrentCPU }
-            $TempMem = if ($memGB -gt 0) { $memGB } else { $CurrentMemGB }
-            $FinalMemGB = if ($TempMem -lt 1) { 1 } else { $TempMem }
-
-            if ($FinalCPU -eq $CurrentCPU -and $FinalMemGB -eq $CurrentMemGB) {
-                $Status = "skipped (no change)"
-            } else {
-                Write-Output "[$vmName] Attempt 1: ACPI shutdown..."
-                Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
-                Start-Sleep -Seconds 40
-                $CheckVM = Get-NTNXVM -Vmid $vm.uuid
-                if ($CheckVM.powerState -eq "ON") {
-                    Write-Output "[$vmName] Attempt 2: ACPI shutdown again..."
-                    Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
-                    Start-Sleep -Seconds 20
+        Write-Host "Configuring WinRM TrustedHosts for target guest: $current_GuestIP..."
+        if (Test-Path "WSMan:\localhost\Client\TrustedHosts") {
+            $CurrentTrusted = (Get-Item WSMan:\localhost\Client\TrustedHosts).Value
+            if ($CurrentTrusted -ne "*" -and $CurrentTrusted -notlike "*$current_GuestIP*") {
+                if ([string]::IsNullOrWhiteSpace($CurrentTrusted)) {
+                    Set-Item WSMan:\localhost\Client\TrustedHosts -Value $current_GuestIP -Force -Confirm:$false | Out-Null
+                } else {
+                    Set-Item WSMan:\localhost\Client\TrustedHosts -Value ("$CurrentTrusted," + $current_GuestIP) -Force -Confirm:$false | Out-Null
                 }
-
-                Write-Output "[$vmName] Applying: $FinalCPU CPU, $FinalMemGB GB RAM."
-                Set-NTNXVirtualMachine -Vmid $vm.uuid -NumVcpus $FinalCPU -MemoryMb ($FinalMemGB * 1024) -ErrorAction Stop | Out-Null
-                Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ON -ErrorAction Stop | Out-Null
-                $Status = "successful"
             }
         }
     } catch {
-        $Status = "failed - $($_.Exception.Message.Split(':')[0])"
-    } finally {
-        Disconnect-NTNXCluster -Servers $ip -ErrorAction SilentlyContinue
+        Write-Warning "Failed to set TrustedHosts in script. Ensure runner shell is elevated, or configure it in the YAML step."
     }
 
-    "$site,$vmName,$CurrentCPU,$CurrentMemGB,$FinalCPU,$FinalMemGB,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
-    Write-Output "[$vmName] $Status"
-}
+    $SecurePassword = ConvertTo-SecureString $env:PE_PASSWORD -AsPlainText -Force
+    $Credential = New-Object PSCredential ($env:PE_USERNAME,$SecurePassword)
 
-# ---------- Process Sizing Input Sets ----------
-$jobs = @()
-$sets = @()
+    $Session = New-SSHSession -ComputerName $current_pe_ip -Credential $Credential -AcceptKey -Force
 
-# Set 1 Sizing
-if (-not [string]::IsNullOrWhiteSpace($data.s1) -and $data.s1 -ne "None" -and -not [string]::IsNullOrWhiteSpace($data.v1)) {
-    $sets += @{
-        site   = $data.s1
-        vms    = $data.v1
-        cpus   = $data.c1
-        mems   = $data.m1
-        delays = $data.d1
-    }
-}
-
-# Set 2 Sizing (Optional)
-if ($data.PSObject.Properties['s2'] -and $data.PSObject.Properties['v2']) {
-    if (-not [string]::IsNullOrWhiteSpace($data.s2) -and $data.s2 -ne "None" -and -not [string]::IsNullOrWhiteSpace($data.v2)) {
-        $sets += @{
-            site   = $data.s2
-            vms    = $data.v2
-            cpus   = $data.c2
-            mems   = $data.m2
-            delays = $data.d2
-        }
-    }
-}
-
-if ($sets.Count -eq 0) {
-    throw "No active input sets provided. Please provide Site Name and VM Names."
-}
-
-foreach ($set in $sets) {
-    $siteName = $set.site
-    if (-not $siteMap.ContainsKey($siteName)) {
-        throw "Site '$siteName' not found in mapping. Available: $($siteMap.Keys -join ', ')"
-    }
-
-    # ---------- Parse VM list (Ensures collection is always an array) ----------
-    $vmNames = @(($set.vms -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
-    if ($vmNames.Count -eq 0) {
-        continue
-    }
-
-    # ---------- Expand CPU, Memory, and Delay ----------
-    $cpus = Expand-Value -vmList $vmNames -inputValue $set.cpus -valueName "CPU"
-    $mems = Expand-Value -vmList $vmNames -inputValue $set.mems -valueName "Memory"
-    $delays = Expand-Value -vmList $vmNames -inputValue $set.delays -valueName "Delay"
-
-    # ---------- Optional: cap delays ----------
-    $MAX_DELAY_MINUTES = 60
-    for ($i = 0; $i -lt $delays.Count; $i++) {
-        if ($delays[$i] -gt $MAX_DELAY_MINUTES) {
-            Write-Warning "Delay of $($delays[$i]) minutes exceeds cap of $MAX_DELAY_MINUTES. Capping to $MAX_DELAY_MINUTES."
-            $delays[$i] = $MAX_DELAY_MINUTES
-        }
-    }
-
-    # ---------- Print schedule ----------
-    Write-Output "`n===== Schedule for $siteName (parallel jobs) ====="
-    for ($i = 0; $i -lt $vmNames.Count; $i++) {
-        Write-Output "$($vmNames[$i]) : CPU=$($cpus[$i]), Memory=$($mems[$i]) GB, delay=$($delays[$i]) min"
-    }
-
-    # ---------- Start a background job for each VM ----------
-    for ($i = 0; $i -lt $vmNames.Count; $i++) {
-        $job = Start-Job -ScriptBlock $resizeJob -ArgumentList `
-            $siteName, `
-            $vmNames[$i], `
-            $delays[$i], `
-            $cpus[$i], `
-            $mems[$i], `
-            $env:PE_USER, `
-            $env:PE_PASS, `
-            $siteMap, `
-            $logPath
-        $jobs += $job
-    }
-}
-
-# ---------- Wait for all jobs to complete ----------
-Write-Output "`nWaiting for all resize jobs to finish..."
-$jobs | Wait-Job | Out-Null
-
-# ---------- Receive output from each job ----------
-$jobs | ForEach-Object {
-    Receive-Job $_ -ErrorAction SilentlyContinue
-    Remove-Job $_
-}
-
-# ---------- Generate GitHub Actions Step Summary Table ----------
-if ($env:GITHUB_STEP_SUMMARY) {
-    if (Test-Path $logPath) {
-        $lines = Get-Content $logPath
-        $md = @()
-        $md += "### Nutanix VM Resize Summary"
-        $md += ""
-        $md += "| Site Name | VMName | Current CPU | Current Mem | New CPU | New Mem | Status |"
-        $md += "| :--- | :--- | :---: | :---: | :---: | :---: | :--- |"
-        
-        foreach ($line in $lines) {
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            $parts = $line.Split(',')
-            if ($parts.Count -ge 7) {
-                $site = $parts[0]
-                $vmName = $parts[1]
-                $currCpu = $parts[2]
-                $currMem = $parts[3]
-                $newCpu = $parts[4]
-                $newMem = $parts[5]
-                $status = $parts[6]
-                
-                $statusFormatted = "Unknown"
-                if ($status -like "*successful*") {
-                    $statusFormatted = "Successful"
-                } elseif ($status -like "*skipped*") {
-                    $statusFormatted = "Skipped"
-                } elseif ($status -like "*VM Not Found*") {
-                    $statusFormatted = "VM Not Found"
-                } else {
-                    $statusFormatted = "Failed"
-                }
-                
-                $md += "| $site | $vmName | $currCpu | $currMem | $newCpu | $newMem | $statusFormatted |"
+    try {
+        # ==========================================
+        # 1. NUTANIX CLUSTER DISK CONFIGURATION
+        # ==========================================
+        if ($current_disk_action -eq "add") {
+            if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
+                Add-PSSnapin NutanixCmdletsPSSnapin
             }
+
+            Connect-NTNXCluster -Server $current_pe_ip -UserName $env:PE_USERNAME -Password $SecurePassword -AcceptInvalidSSLCerts | Out-Null
+
+            $ClusterDetails = Get-NTNXCluster
+            $Prefix = $ClusterDetails.name.Substring(0,[math]::Min(3,$ClusterDetails.name.Length))
+
+            $BestContainer = Get-NTNXContainer |
+            Where-Object {
+                $n = if ($_.name) { $_.name } else { $_.containerName }
+                $n -like ("$Prefix" + "*") -and $n -notmatch "NutanixManagementShare|NutaniXFitInstance|default-container"
+            } |
+            Select-Object *,@{
+                Name="FreePct"
+                Expression={
+                    $Cap=[double]$_.usageStats.'storage.capacity_bytes'
+                    $Use=[double]$_.usageStats.'storage.usage_bytes'
+                    if($Cap -gt 0){ (($Cap-$Use)/$Cap)*100 } else {0}
+                }
+            } |
+            Sort-Object FreePct -Descending |
+            Select-Object -First 1
+
+            $ContainerName = if ($BestContainer.name) { $BestContainer.name } else { $BestContainer.containerName }
+
+            $AcliCommand = "acli vm.disk_create '$current_vmname' container='$ContainerName' create_size='" + $current_SizeGB + "G'"
         }
-        $md | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+        else {
+            $AcliCommand = "acli vm.disk_update '$current_vmname' disk_addr='$current_DiskAddr' new_size='" + $current_SizeGB + "G'"
+        }
+
+        $Result = Invoke-SSHCommand -SessionId $Session.SessionId -Command $AcliCommand
+        Write-Host "Nutanix ACLI Output: $($Result.Output)"
+
+        # Error handling for raw ACLI failures
+        if ($Result.Output -like "*Error:*") {
+            throw "Nutanix ACLI operation failed: $($Result.Output)"
+        }
+
+        # ==========================================
+        # 2. WINDOWS GUEST AUTOMATION (OS LAYER)
+        # ==========================================
+        $GuestSecurePassword = ConvertTo-SecureString $env:LOCAL_PASSWORD -AsPlainText -Force
+        $GuestCredential = New-Object System.Management.Automation.PSCredential($env:LOCAL_USERNAME,$GuestSecurePassword)
+
+        Write-Host "Waiting 20 seconds for Nutanix disk hotplug/resize action to commit on Guest OS..."
+        Start-Sleep -Seconds 20
+
+        Invoke-Command -ComputerName $current_GuestIP -Credential $GuestCredential -ScriptBlock {
+            param($Action, $DriveLetter)
+
+            # Force dynamic disk and storage layer re-discovery
+            try {
+                Update-StorageProviderCache -DiscoveryLevel Full -ErrorAction SilentlyContinue
+            } catch {}
+            
+            "rescan" | diskpart | Out-Null
+            Start-Sleep -Seconds 5
+
+            if ($Action -eq "add") {
+                # Retrieve the newly hot-plugged raw or offline disk
+                $Disk = Get-Disk | Where-Object {
+                    $_.PartitionStyle -eq "RAW" -or $_.OperationalStatus -eq "Offline"
+                } | Sort-Object Number | Select-Object -First 1
+
+                if (-not $Disk) { 
+                    throw "No RAW or Offline disk found. Please ensure the new virtual drive is recognized." 
+                }
+
+                if ($Disk.OperationalStatus -eq "Offline") {
+                    Set-Disk -Number $Disk.Number -IsOffline $false
+                }
+
+                Initialize-Disk -Number $Disk.Number -PartitionStyle GPT
+                $Partition = New-Partition -DiskNumber $Disk.Number -DriveLetter $DriveLetter -UseMaximumSize
+                Format-Volume -Partition $Partition -FileSystem NTFS -Confirm:$false -Force
+                
+                Write-Host "Successfully initialized RAW Disk \$($Disk.Number) and mapped to Drive " + $DriveLetter + ":"
+            }
+            else {
+                $Partition = Get-Partition -DriveLetter $DriveLetter
+                if (-not $Partition) {
+                    throw "Drive letter " + $DriveLetter + ": was not found on the guest OS. Cannot extend."
+                }
+
+                # CRITICAL OS FIX: Force Windows to clear size caching and read new limits
+                Update-Disk -Number $Partition.DiskNumber -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 3
+
+                # Query the expanded physical disk bounds
+                $SupportedSize = Get-PartitionSupportedSize `
+                    -DiskNumber $Partition.DiskNumber `
+                    -PartitionNumber $Partition.PartitionNumber
+
+                # Extend partition to maximum size
+                Resize-Partition `
+                    -DiskNumber $Partition.DiskNumber `
+                    -PartitionNumber $Partition.PartitionNumber `
+                    -Size $SupportedSize.SizeMax
+
+                Write-Host "Successfully expanded Drive " + $DriveLetter + ": to maximum size of \$([math]::Round($SupportedSize.SizeMax / 1GB, 2)) GB"
+            }
+
+        } -ArgumentList $current_disk_action, $current_DriveLetter
+
+    }
+    finally {
+        if (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue) {
+            Disconnect-NTNXCluster -Servers $current_pe_ip -ErrorAction SilentlyContinue | Out-Null
+        }
+
+        if ($Session) {
+            Remove-SSHSession -SessionId $Session.SessionId | Out-Null
+        }
     }
 }
 
-Write-Output "`n===== All VMs processed. Log saved to $logPath ====="
+# Execute Set 1
+Invoke-DiskProvisioning `
+    -current_pe_ip $pe_ip `
+    -current_vmname $vmname `
+    -current_disk_action $disk_action `
+    -current_SizeGB $SizeGB `
+    -current_DiskAddr $DiskAddr `
+    -current_GuestIP $GuestIP `
+    -current_DriveLetter $DriveLetter
+
+# Execute Set 2 (if provided)
+if (-not [string]::IsNullOrWhiteSpace($pe_ip2) -and -not [string]::IsNullOrWhiteSpace($vmname2) -and -not [string]::IsNullOrWhiteSpace($GuestIP2)) {
+    Write-Host "\`n========================================="
+    Write-Host "Starting Set 2 Disk Provisioning"
+    Write-Host "========================================="
+    Invoke-DiskProvisioning `
+        -current_pe_ip $pe_ip2 `
+        -current_vmname $vmname2 `
+        -current_disk_action $disk_action2 `
+        -current_SizeGB $SizeGB2 `
+        -current_DiskAddr $DiskAddr2 `
+        -current_GuestIP $GuestIP2 `
+        -current_DriveLetter $DriveLetter2
+}
+
+Write-Host "Completed successfully."
