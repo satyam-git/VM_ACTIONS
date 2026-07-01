@@ -3,17 +3,21 @@ name: Nutanix VM Disk Resizing
 on:
   workflow_dispatch:
     inputs:
-      # --- SET 1 ---
-      pe_ip:
-        description: "1: Prism Element / CVM IP"
+      site_name:
+        description: "Site Name"
         required: true
-        type: string
+        default: Banglore
+        type: choice
+        options:
+          - Banglore
+          - Chennai
+          - CPune
       vmname:
-        description: "1: VM Name"
+        description: "VM Name"
         required: true
         type: string
       disk_action:
-        description: "1: Disk Action"
+        description: "Disk Action"
         required: true
         default: add
         type: choice
@@ -21,11 +25,11 @@ on:
           - add
           - extend
       SizeGB:
-        description: "1: Disk Size in GB"
+        description: "Disk Size in GB"
         required: true
         type: string
       DiskAddr:
-        description: "1: Disk Address"
+        description: "Disk Address (Required for extend)"
         required: true
         default: none
         type: choice
@@ -37,59 +41,12 @@ on:
           - scsi.3
           - scsi.4
       GuestIP:
-        description: "1: Windows Guest IP"
+        description: "Windows Guest IP"
         required: true
         type: string
       DriveLetter:
-        description: "1: Drive Letter"
+        description: "Drive Letter"
         required: true
-        type: string
-
-      # --- SET 2 (Optional) ---
-      pe_ip2:
-        description: "2: Prism Element / CVM IP (Optional)"
-        required: false
-        default: ""
-        type: string
-      vmname2:
-        description: "2: VM Name (Optional)"
-        required: false
-        default: ""
-        type: string
-      disk_action2:
-        description: "2: Disk Action (Optional)"
-        required: false
-        default: add
-        type: choice
-        options:
-          - add
-          - extend
-      SizeGB2:
-        description: "2: Disk Size in GB (Optional)"
-        required: false
-        default: ""
-        type: string
-      DiskAddr2:
-        description: "2: Disk Address (Optional)"
-        required: false
-        default: none
-        type: choice
-        options:
-          - none
-          - scsi.0
-          - scsi.1
-          - scsi.2
-          - scsi.3
-          - scsi.4
-      GuestIP2:
-        description: "2: Windows Guest IP (Optional)"
-        required: false
-        default: ""
-        type: string
-      DriveLetter2:
-        description: "2: Drive Letter (Optional)"
-        required: false
-        default: ""
         type: string
 
 jobs:
@@ -125,19 +82,6 @@ jobs:
           PE_PASSWORD: ${{ secrets.PE_PASSWORD }}
           LOCAL_USERNAME: ${{ secrets.LOCAL_USERNAME }}
           LOCAL_PASSWORD: ${{ secrets.LOCAL_PASSWORD }}
+          INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
-          & "$env:GITHUB_WORKSPACE\Scripts\Nutanix VM Resize Disk.ps1" `
-            -pe_ip "${{ inputs.pe_ip }}" `
-            -vmname "${{ inputs.vmname }}" `
-            -disk_action "${{ inputs.disk_action }}" `
-            -SizeGB "${{ inputs.SizeGB }}" `
-            -DiskAddr "${{ inputs.DiskAddr }}" `
-            -GuestIP "${{ inputs.GuestIP }}" `
-            -DriveLetter "${{ inputs.DriveLetter }}" `
-            -pe_ip2 "${{ inputs.pe_ip2 }}" `
-            -vmname2 "${{ inputs.vmname2 }}" `
-            -disk_action2 "${{ inputs.disk_action2 }}" `
-            -SizeGB2 "${{ inputs.SizeGB2 }}" `
-            -DiskAddr2 "${{ inputs.DiskAddr2 }}" `
-            -GuestIP2 "${{ inputs.GuestIP2 }}" `
-            -DriveLetter2 "${{ inputs.DriveLetter2 }}"
+          & "$env:GITHUB_WORKSPACE\Scripts\Nutanix VM Resize Disk.ps1" -JsonInputs $env:INPUTS_JSON
