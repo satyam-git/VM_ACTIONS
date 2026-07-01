@@ -3,10 +3,15 @@ name: Nutanix VM Disk Resizing
 on:
   workflow_dispatch:
     inputs:
-      pe_ip:
-        description: "Prism Element / CVM IP"
+      site_name:
+        description: "Site Name"
         required: true
-        type: string
+        default: Bangalore
+        type: choice
+        options:
+          - Bangalore
+          - Chennai
+          - Pune
       vmname:
         description: "VM Name"
         required: true
@@ -77,12 +82,6 @@ jobs:
           PE_PASSWORD: ${{ secrets.PE_PASSWORD }}
           LOCAL_USERNAME: ${{ secrets.LOCAL_USERNAME }}
           LOCAL_PASSWORD: ${{ secrets.LOCAL_PASSWORD }}
+          INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
-          & "$env:GITHUB_WORKSPACE\Scripts\Nutanix VM Resize Disk.ps1" `
-            -pe_ip "${{ inputs.pe_ip }}" `
-            -vmname "${{ inputs.vmname }}" `
-            -disk_action "${{ inputs.disk_action }}" `
-            -SizeGB "${{ inputs.SizeGB }}" `
-            -DiskAddr "${{ inputs.DiskAddr }}" `
-            -GuestIP "${{ inputs.GuestIP }}" `
-            -DriveLetter "${{ inputs.DriveLetter }}"
+          & "$env:GITHUB_WORKSPACE\Scripts\Nutanix VM Resize Disk.ps1" -JsonInputs $env:INPUTS_JSON
