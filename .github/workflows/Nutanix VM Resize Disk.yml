@@ -67,7 +67,7 @@ jobs:
           LOCAL_USERNAME: ${{ secrets.LOCAL_USERNAME }}
           LOCAL_PASSWORD: ${{ secrets.LOCAL_PASSWORD }}
         run: |
-          & "$env:GITHUB_WORKSPACE\Scripts\diskprovisioning.ps1" `
+          & "$env:GITHUB_WORKSPACE\Scripts\Nutanix VM Resize Disk.ps1" `
             -pe_ip "${{ inputs.pe_ip }}" `
             -vmname "${{ inputs.vmname }}" `
             -disk_action "${{ inputs.disk_action }}" `
