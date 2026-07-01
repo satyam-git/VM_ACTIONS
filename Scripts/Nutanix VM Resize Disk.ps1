@@ -161,26 +161,39 @@ function Invoke-DiskProvisioning {
         Invoke-Command -ComputerName $current_GuestIP -Credential $GuestCredential -ScriptBlock {
             param($Action, $DriveLetter)
 
-            # Force dynamic disk and storage layer re-discovery
-            try {
-                Update-StorageProviderCache -DiscoveryLevel Full -ErrorAction SilentlyContinue
-            } catch {}
-            
-            "rescan" | diskpart | Out-Null
-            Start-Sleep -Seconds 5
-
             if ($Action -eq "add") {
-                # Retrieve the newly hot-plugged raw or offline disk
-                $Disk = Get-Disk | Where-Object {
-                    $_.PartitionStyle -eq "RAW" -or $_.OperationalStatus -eq "Offline"
-                } | Sort-Object Number | Select-Object -First 1
+                $Disk = $null
+                $maxAttempts = 6
+                for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+                    Write-Host "Scanning for newly hot-plugged RAW or Offline disk (Attempt $attempt of $maxAttempts)..."
+                    
+                    try {
+                        Update-StorageProviderCache -DiscoveryLevel Full -ErrorAction SilentlyContinue
+                    } catch {}
+                    
+                    "rescan" | diskpart | Out-Null
+                    Start-Sleep -Seconds 5
+                    
+                    $Disk = Get-Disk | Where-Object {
+                        $_.PartitionStyle -eq "RAW" -or $_.OperationalStatus -eq "Offline" -or $_.PartitionStyle -eq "None" -or $_.PartitionStyle -eq "Unknown"
+                    } | Sort-Object Number | Select-Object -First 1
+                    
+                    if ($Disk) {
+                        Write-Host "Found target disk: Number $($Disk.Number), Size $($Disk.Size), OperationalStatus $($Disk.OperationalStatus), PartitionStyle $($Disk.PartitionStyle)"
+                        break
+                    }
+                }
 
                 if (-not $Disk) { 
+                    Write-Host "All current disks on the Guest OS:"
+                    Get-Disk | ForEach-Object {
+                        Write-Host "Disk #$($_.Number): Size=$($_.Size), OpStatus=$($_.OperationalStatus), Style=$($_.PartitionStyle)"
+                    }
                     throw "No RAW or Offline disk found. Please ensure the new virtual drive is recognized." 
                 }
 
                 if ($Disk.OperationalStatus -eq "Offline") {
-                    Set-Disk -Number $Disk.Number -IsOffline $false
+                    Set-Disk -Number $Disk.Number -IsOffline $false -IsReadOnly $false -ErrorAction SilentlyContinue
                 }
 
                 Initialize-Disk -Number $Disk.Number -PartitionStyle GPT
@@ -239,7 +252,7 @@ Invoke-DiskProvisioning `
 
 # Execute Set 2 (if provided)
 if (-not [string]::IsNullOrWhiteSpace($pe_ip2) -and -not [string]::IsNullOrWhiteSpace($vmname2) -and -not [string]::IsNullOrWhiteSpace($GuestIP2)) {
-    Write-Host "\`n========================================="
+    Write-Host "`n========================================="
     Write-Host "Starting Set 2 Disk Provisioning"
     Write-Host "========================================="
     Invoke-DiskProvisioning `
