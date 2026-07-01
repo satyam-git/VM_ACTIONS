@@ -1,4 +1,4 @@
-name: Nutanix Disk Provisioning
+name: Nutanix VM Disk Resizing
 
 on:
   workflow_dispatch:
