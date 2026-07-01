@@ -6,12 +6,12 @@ on:
       site_name:
         description: "Site Name"
         required: true
-        default: Bangalore
+        default: Banglore
         type: choice
         options:
-          - Bangalore
+          - Banglore
           - Chennai
-          - Pune
+          - CPune
       vmname:
         description: "VM Name"
         required: true
@@ -29,7 +29,7 @@ on:
         required: true
         type: string
       DiskAddr:
-        description: "Disk Address"
+        description: "Disk Address (Required for extend)"
         required: true
         default: none
         type: choice
