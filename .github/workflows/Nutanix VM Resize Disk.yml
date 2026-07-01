@@ -1,87 +1,30 @@
-name: Nutanix VM Disk Resizing
+name: Nutanix VMResize_cpu&mem
 
 on:
   workflow_dispatch:
     inputs:
-      site_name:
-        description: "Site Name"
-        required: true
-        default: Banglore
-        type: choice
-        options:
-          - Banglore
-          - Chennai
-          - CPune
-      vmname:
-        description: "VM Name"
-        required: true
-        type: string
-      disk_action:
-        description: "Disk Action"
-        required: true
-        default: add
-        type: choice
-        options:
-          - add
-          - extend
-      SizeGB:
-        description: "Disk Size in GB"
-        required: true
-        type: string
-      DiskAddr:
-        description: "Disk Address (Required for extend)"
-        required: true
-        default: none
-        type: choice
-        options:
-          - none
-          - scsi.0
-          - scsi.1
-          - scsi.2
-          - scsi.3
-          - scsi.4
-      GuestIP:
-        description: "Windows Guest IP"
-        required: true
-        type: string
-      DriveLetter:
-        description: "Drive Letter"
-        required: true
-        type: string
+      s1: { description: '1: Site Name', required: true, type: choice, options: [Banglore, Chennai, CPune] }
+      v1: { description: '1: VM Names (comma separated)', required: true, type: string }
+      c1: { description: '1: CPU Cores (applies to all)', required: true, type: string }
+      m1: { description: '1: Memory (GB) (applies to all)', required: true, type: string }
+      d1: { description: '1: Delays (min, comma separated, same order as VMs)', required: false, default: '0', type: string }
+      s2: { description: '2: Site Name', required: false, default: 'None', type: choice, options: [None, Banglore, Chennai, CPune] }
+      v2: { description: '2: VM Names (comma separated)', required: false, default: '', type: string }
+      c2: { description: '2: CPU Cores (applies to all)', required: false, default: '', type: string }
+      m2: { description: '2: Memory (GB) (applies to all)', required: false, default: '', type: string }
+      d2: { description: '2: Delays (min, comma separated, same order as VMs)', required: false, default: '0', type: string }
 
 jobs:
-  provision-disk:
+  run-compute-resize:
     runs-on: self-hosted
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Posh-SSH
-        shell: powershell
-        run: |
-          Set-PSRepository PSGallery -InstallationPolicy Trusted
-          if (-not (Get-Module -ListAvailable -Name Posh-SSH)) {
-            Install-Module Posh-SSH -Scope CurrentUser -Force -AllowClobber
-          }
-
-      - name: Configure WinRM TrustedHosts
-        shell: powershell
-        run: |
-          try {
-            # Bypass IP restriction by adding target guest IP address to the runner's TrustedHosts
-            Set-Item WSMan:\localhost\Client\TrustedHosts -Value "*" -Force
-            Write-Host "WinRM TrustedHosts configured to trust guest IPs successfully."
-          } catch {
-            Write-Warning "Could not write TrustedHosts: $($_.Exception.Message). Script will fallback to dynamic local settings."
-          }
-
-      - name: Execute Disk Provisioning
+      - name: Run Compute Resize
         shell: powershell
         env:
-          PE_USERNAME: ${{ secrets.PE_USERNAME }}
-          PE_PASSWORD: ${{ secrets.PE_PASSWORD }}
-          LOCAL_USERNAME: ${{ secrets.LOCAL_USERNAME }}
-          LOCAL_PASSWORD: ${{ secrets.LOCAL_PASSWORD }}
+          PE_USER: ${{ secrets.PE_Username }}
+          PE_PASS: ${{ secrets.PE_Password }}
           INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
-          & "$env:GITHUB_WORKSPACE\Scripts\Nutanix VM Resize Disk.ps1" -JsonInputs $env:INPUTS_JSON
+          # The PowerShell script writes directly to GITHUB_STEP_SUMMARY environment variable
+          & "$env:GITHUB_WORKSPACE\Scripts\VMResize_cpu&mem.ps1" -JsonInputs $env:INPUTS_JSON
