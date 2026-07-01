@@ -17,7 +17,7 @@ function Convert-ToInteger {
 }
 
 # ---------- Helper: expand a single value or a list to match VM count ----------
-function Expand-Values {
+function Expand-Value {
     param(
         [string[]]$vmList,
         [string]$inputValue,
@@ -27,8 +27,6 @@ function Expand-Values {
     if ($vmCount -eq 0) { return @() }
 
     $values = if ([string]::IsNullOrWhiteSpace($inputValue)) {
-        # Default: if no input, use 0 for delay, or maybe we don't have a default for CPU/mem? We'll handle that later.
-        # For CPU/Mem, we cannot default to 0, so we'll throw if empty.
         @()
     } else {
         $inputValue -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | ForEach-Object {
@@ -37,9 +35,6 @@ function Expand-Values {
     }
 
     if ($values.Count -eq 0) {
-        # If no values given, we need to decide:
-        # - For Delay: default to 0
-        # - For CPU/Mem: throw an error because they are required.
         if ($valueName -eq "Delay") {
             return @(0) * $vmCount
         } else {
@@ -48,11 +43,9 @@ function Expand-Values {
     }
 
     if ($values.Count -eq 1) {
-        # Single value: replicate to all VMs
         return @($values[0]) * $vmCount
     }
 
-    # Multiple values: truncate or pad with the last value
     $result = @()
     for ($i = 0; $i -lt $vmCount; $i++) {
         if ($i -lt $values.Count) { $result += $values[$i] }
@@ -68,9 +61,9 @@ if ($vmNames.Count -eq 0) {
 }
 
 # ---------- Expand CPU, Memory, and Delay ----------
-$cpus = Expand-Values -vmList $vmNames -inputValue $data.c1 -valueName "CPU"
-$mems = Expand-Values -vmList $vmNames -inputValue $data.m1 -valueName "Memory"
-$delays = Expand-Values -vmList $vmNames -inputValue $data.d1 -valueName "Delay"
+$cpus = Expand-Value -vmList $vmNames -inputValue $data.c1 -valueName "CPU"
+$mems = Expand-Value -vmList $vmNames -inputValue $data.m1 -valueName "Memory"
+$delays = Expand-Value -vmList $vmNames -inputValue $data.d1 -valueName "Delay"
 
 # ---------- Optional: cap delays ----------
 $MAX_DELAY_MINUTES = 60
@@ -82,11 +75,11 @@ for ($i = 0; $i -lt $delays.Count; $i++) {
 }
 
 # ---------- Print schedule ----------
-Write-Host "`n===== Schedule (parallel jobs) ====="
+Write-Output "`n===== Schedule (parallel jobs) ====="
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
-    Write-Host "$($vmNames[$i]) : CPU=$($cpus[$i]), Memory=$($mems[$i]) GB, delay=$($delays[$i]) min"
+    Write-Output "$($vmNames[$i]) : CPU=$($cpus[$i]), Memory=$($mems[$i]) GB, delay=$($delays[$i]) min"
 }
-Write-Host "Start time: $(Get-Date -Format 'HH:mm:ss')`n"
+Write-Output "Start time: $(Get-Date -Format 'HH:mm:ss')`n"
 
 # ---------- Prepare logging ----------
 $logPath = Join-Path $env:GITHUB_WORKSPACE "data\resize_log.csv"
@@ -104,7 +97,6 @@ $siteName = $data.s1
 if (-not $siteMap.ContainsKey($siteName)) {
     throw "Site '$siteName' not found in mapping. Available: $($siteMap.Keys -join ', ')"
 }
-$ClusterIP = $siteMap[$siteName]   # kept for logging structure/consistency
 
 # ---------- Define the job script block ----------
 $resizeJob = {
@@ -112,18 +104,16 @@ $resizeJob = {
 
     $ip = $siteMap[$site]
     if (-not $ip) {
-        # Enhanced format: SiteName,VMName,CurrentCPU,CurrentMem,NewCPU,NewMem,Status
         "$site,$vmName,N/A,N/A,$cpu,$memGB,ERROR: Site not mapped" | Out-File -FilePath $logPath -Append -Encoding utf8
         return
     }
 
-    # Wait for the delay (if any)
     if ($delayMin -gt 0) {
-        Write-Host "[$vmName] Waiting $delayMin minute(s)..."
+        Write-Output "[$vmName] Waiting $delayMin minute(s)..."
         Start-Sleep -Seconds ($delayMin * 60)
     }
 
-    # Load Nutanix snapin
+    # Load Nutanix Cmdlets if they aren't already loaded in the runspace context
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
         Add-PSSnapin NutanixCmdletsPSSnapin
     }
@@ -146,7 +136,7 @@ $resizeJob = {
         } else {
             $CurrentCPU = [int]$vm.numVcpus
             
-            # Robust property resolution probing for Nutanix Cmdlets versions
+            # Robust property resolver across different Nutanix AHV API & Cmdlet versions
             $memMib = 0
             if ($vm.memorySizeMib -ne $null -and $vm.memorySizeMib -ne 0) {
                 $memMib = $vm.memorySizeMib
@@ -171,19 +161,17 @@ $resizeJob = {
             if ($FinalCPU -eq $CurrentCPU -and $FinalMemGB -eq $CurrentMemGB) {
                 $Status = "skipped (no change)"
             } else {
-                # Two‑strike shutdown
-                Write-Host "[$vmName] Attempt 1: ACPI shutdown..."
+                Write-Output "[$vmName] Attempt 1: ACPI shutdown..."
                 Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
                 Start-Sleep -Seconds 40
                 $CheckVM = Get-NTNXVM -Vmid $vm.uuid
                 if ($CheckVM.powerState -eq "ON") {
-                    Write-Host "[$vmName] Attempt 2: ACPI shutdown again..."
+                    Write-Output "[$vmName] Attempt 2: ACPI shutdown again..."
                     Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
                     Start-Sleep -Seconds 20
                 }
 
-                # Resize and power on
-                Write-Host "[$vmName] Applying: $FinalCPU CPU, $FinalMemGB GB RAM."
+                Write-Output "[$vmName] Applying: $FinalCPU CPU, $FinalMemGB GB RAM."
                 Set-NTNXVirtualMachine -Vmid $vm.uuid -NumVcpus $FinalCPU -MemoryMb ($FinalMemGB * 1024) -ErrorAction Stop | Out-Null
                 Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ON -ErrorAction Stop | Out-Null
                 $Status = "successful"
@@ -195,9 +183,9 @@ $resizeJob = {
         Disconnect-NTNXCluster -Servers $ip -ErrorAction SilentlyContinue
     }
 
-    # Enhanced log row with original and new sizing details
+    # Enhanced CSV line with both Current and Target metrics
     "$site,$vmName,$CurrentCPU,$CurrentMemGB,$FinalCPU,$FinalMemGB,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
-    Write-Host "[$vmName] $Status"
+    Write-Output "[$vmName] $Status"
 }
 
 # ---------- Start a background job for each VM ----------
@@ -217,7 +205,7 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
 }
 
 # ---------- Wait for all jobs to complete ----------
-Write-Host "`nWaiting for all resize jobs to finish..."
+Write-Output "`nWaiting for all resize jobs to finish..."
 $jobs | Wait-Job | Out-Null
 
 # ---------- Receive output from each job ----------
@@ -248,7 +236,6 @@ if ($env:GITHUB_STEP_SUMMARY) {
                 $newMem = $parts[5]
                 $status = $parts[6]
                 
-                # Format status with a nice icon/emoji matching your report requirements
                 $statusFormatted = "Unknown"
                 if ($status -like "*successful*") {
                     $statusFormatted = "Successful"
@@ -267,4 +254,4 @@ if ($env:GITHUB_STEP_SUMMARY) {
     }
 }
 
-Write-Host "`n===== All VMs processed. Log saved to $logPath ====="
+Write-Output "`n===== All VMs processed. Log saved to $logPath ====="
