@@ -24,8 +24,6 @@ function Expand-Values {
     $vmCount = $vmList.Count
     if ($vmCount -eq 0) { return @() }
     $values = if ([string]::IsNullOrWhiteSpace($inputValue)) {
-        # Default: if no input, use 0 for delay, or maybe we don't have a default for CPU/mem? We'll handle that later.
-        # For CPU/Mem, we cannot default to 0, so we'll throw if empty.
         @()
     } else {
         $inputValue -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | ForEach-Object {
@@ -33,9 +31,6 @@ function Expand-Values {
         }
     }
     if ($values.Count -eq 0) {
-        # If no values given, we need to decide:
-        # - For Delay: default to 0
-        # - For CPU/Mem: throw an error because they are required.
         if ($valueName -eq "Delay") {
             return @(0) * $vmCount
         } else {
@@ -43,10 +38,8 @@ function Expand-Values {
         }
     }
     if ($values.Count -eq 1) {
-        # Single value: replicate to all VMs
         return @($values[0]) * $vmCount
     }
-    # Multiple values: truncate or pad with the last value
     $result = @()
     for ($i = 0; $i -lt $vmCount; $i++) {
         if ($i -lt $values.Count) { $result += $values[$i] }
@@ -91,13 +84,13 @@ $siteName = $data.s1
 if (-not $siteMap.ContainsKey($siteName)) {
     throw "Site '$siteName' not found in mapping. Available: $($siteMap.Keys -join ', ')"
 }
-$ClusterIP = $siteMap[$siteName]   # not directly used but kept for consistency
+$ClusterIP = $siteMap[$siteName]
 # ---------- Define the job script block ----------
 $resizeJob = {
     param($site, $vmName, $delayMin, $cpu, $memGB, $user, $pass, $siteMap, $logPath)
     $ip = $siteMap[$site]
     if (-not $ip) {
-        "$site,$vmName,$cpu,$memGB,$delayMin,ERROR: Site not mapped" | Out-File -FilePath $logPath -Append -Encoding utf8
+        "$site,$vmName,N/A,N/A,$cpu,$memGB,ERROR: Site not mapped" | Out-File -FilePath $logPath -Append -Encoding utf8
         return
     }
     # Wait for the delay (if any)
@@ -105,10 +98,17 @@ $resizeJob = {
         Write-Host "[$vmName] Waiting $delayMin minute(s)..."
         Start-Sleep -Seconds ($delayMin * 60)
     }
+    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
+        Add-PSSnapin NutanixCmdletsPSSnapin
+    }
     $creds = New-Object System.Security.SecureString
     foreach ($char in $pass.ToCharArray()) { $creds.AppendChar($char) }
     $creds.MakeReadOnly()
     $Status = "failed"
+    $CurrentCPU = "N/A"
+    $CurrentMemGB = "N/A"
+    $FinalCPU = $cpu
+    $FinalMemGB = $memGB
     try {
         Connect-NTNXCluster -Server $ip -UserName $user -Password $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
         $vm = Get-NTNXVM | Where-Object { $_.vmName -eq $vmName }
@@ -116,7 +116,23 @@ $resizeJob = {
             $Status = "VM Not Found"
         } else {
             $CurrentCPU = [int]$vm.numVcpus
-            $CurrentMemGB = [int]($vm.memoryMb / 1024)
+            # Retrieve memory with compatibility fallback for multiple API/Cmdlet versions
+            $memMib = 0
+            if ($vm.memorySizeMib -ne $null -and $vm.memorySizeMib -ne 0) {
+                $memMib = $vm.memorySizeMib
+            } elseif ($vm.memory_size_mib -ne $null -and $vm.memory_size_mib -ne 0) {
+                $memMib = $vm.memory_size_mib
+            } elseif ($vm.memoryMb -ne $null -and $vm.memoryMb -ne 0) {
+                $memMib = $vm.memoryMb
+            } elseif ($vm.memoryMib -ne $null -and $vm.memoryMib -ne 0) {
+                $memMib = $vm.memoryMib
+            } elseif ($vm.memoryCapacityInBytes -ne $null -and $vm.memoryCapacityInBytes -ne 0) {
+                $memMib = $vm.memoryCapacityInBytes / 1MB
+            }
+            $CurrentMemGB = [int]($memMib / 1024)
+            if ($CurrentMemGB -eq 0 -and $memMib -gt 0) {
+                $CurrentMemGB = 1
+            }
             $FinalCPU = if ($cpu -gt 0) { $cpu } else { $CurrentCPU }
             $TempMem = if ($memGB -gt 0) { $memGB } else { $CurrentMemGB }
             $FinalMemGB = if ($TempMem -lt 1) { 1 } else { $TempMem }
@@ -145,7 +161,7 @@ $resizeJob = {
     } finally {
         Disconnect-NTNXCluster -Servers $ip -ErrorAction SilentlyContinue
     }
-    "$site,$vmName,$cpu,$memGB,$delayMin,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
+    "$site,$vmName,$CurrentCPU,$CurrentMemGB,$FinalCPU,$FinalMemGB,$Status" | Out-File -FilePath $logPath -Append -Encoding utf8
     Write-Host "[$vmName] $Status"
 }
 # ---------- Start a background job for each VM ----------
@@ -170,5 +186,41 @@ $jobs | Wait-Job | Out-Null
 $jobs | ForEach-Object {
     Receive-Job $_ -ErrorAction SilentlyContinue
     Remove-Job $_
+}
+# ---------- New: Generate GitHub Actions Step Summary Table ----------
+if ($env:GITHUB_STEP_SUMMARY) {
+    if (Test-Path $logPath) {
+        $lines = Get-Content $logPath
+        $md = @()
+        $md += "### Nutanix VM Resize Summary"
+        $md += ""
+        $md += "| Site Name | VMName | Current CPU | Current Mem | New CPU | New Mem | Status |"
+        $md += "| :--- | :--- | :---: | :---: | :---: | :---: | :--- |"
+        foreach ($line in $lines) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $parts = $line.Split(',')
+            if ($parts.Count -ge 7) {
+                $site = $parts[0]
+                $vmName = $parts[1]
+                $currCpu = $parts[2]
+                $currMem = $parts[3]
+                $newCpu = $parts[4]
+                $newMem = $parts[5]
+                $status = $parts[6]
+                $statusFormatted = "Unknown"
+                if ($status -like "*successful*") {
+                    $statusFormatted = "Successful"
+                } elseif ($status -like "*skipped*") {
+                    $statusFormatted = "Skipped"
+                } elseif ($status -like "*VM Not Found*") {
+                    $statusFormatted = "VM Not Found"
+                } else {
+                    $statusFormatted = "Failed"
+                }
+                $md += "| $site | $vmName | $currCpu | $currMem | $newCpu | $newMem | $statusFormatted |"
+            }
+        }
+        $md | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+    }
 }
 Write-Host "\n===== All VMs processed. Log saved to $logPath ====="
