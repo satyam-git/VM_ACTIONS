@@ -138,7 +138,7 @@ $resizeJob = {
     $FinalMemGB = $memGB
 
     try {
-        Connect-NTNXCluster -Server $ip -UserName $user -Password $securePass -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
+        Connect-NTNXCluster -Server $ip -UserName $user -Password $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
 
         $vm = Get-NTNXVM | Where-Object { $_.vmName -eq $vmName }
         if (-not $vm) {
@@ -226,7 +226,7 @@ $jobs | ForEach-Object {
     Remove-Job $_
 }
 
-# ---------- New: Generate GitHub Actions Step Summary Table ----------
+# ---------- Generate GitHub Actions Step Summary Table ----------
 if ($env:GITHUB_STEP_SUMMARY) {
     if (Test-Path $logPath) {
         $lines = Get-Content $logPath
