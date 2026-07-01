@@ -1,33 +1,33 @@
-param(
-    [Parameter(Mandatory = $true)]
-    [string]$pe_ip,
+param($JsonInputs)
+$data = $JsonInputs | ConvertFrom-Json
 
-    [Parameter(Mandatory = $true)]
-    [string]$vmname,
+# --- Assign parameters from deserialized JSON payload ---
+$site_name    = $data.site_name
+$vmname       = $data.vmname
+$disk_action  = $data.disk_action
+$SizeGB       = $data.SizeGB
+$DiskAddr     = if ($data.DiskAddr) { $data.DiskAddr } else { "none" }
+$GuestIP      = $data.GuestIP
+$DriveLetter  = $data.DriveLetter
 
-    [Parameter(Mandatory = $true)]
-    [ValidateSet("add","extend")]
-    [string]$disk_action,
+# ---------- Dynamic Site Mapping ----------
+$siteMap = @{
+    "Banglore" = "192.168.136.50"
+    "Chennai"  = "10.0.0.10"
+    "CPune"    = "10.0.0.20"
+}
 
-    [Parameter(Mandatory = $true)]
-    [string]$SizeGB,
-
-    [Parameter(Mandatory = $false)]
-    [ValidateSet("none","scsi.0","scsi.1","scsi.2","scsi.3","scsi.4")]
-    [string]$DiskAddr = "none",
-
-    [Parameter(Mandatory = $true)]
-    [string]$GuestIP,
-
-    [Parameter(Mandatory = $true)]
-    [string]$DriveLetter
-)
+if (-not $siteMap.ContainsKey($site_name)) {
+    throw "Site '$site_name' not found in mapping. Available: $(($siteMap.Keys -join ', '))"
+}
+$pe_ip = $siteMap[$site_name]
 
 $ErrorActionPreference = "Stop"
 
 Write-Host "====================================="
 Write-Host "Nutanix Disk Provisioning Started"
 Write-Host "====================================="
+Write-Host "Site Selected: $site_name (Prism Element: $pe_ip)"
 
 Import-Module Posh-SSH -ErrorAction Stop
 
@@ -120,7 +120,7 @@ try {
     Start-Sleep -Seconds 20
 
     Invoke-Command -ComputerName $GuestIP -Credential $GuestCredential -ScriptBlock {
-        param($Action, $DriveLetter)
+        param($Action, $DriveLetter, $SizeGB)
 
         # Force dynamic disk and storage layer re-discovery
         try {
@@ -156,7 +156,7 @@ try {
                 throw "Drive letter '${DriveLetter}:' was not found on the guest OS. Cannot extend."
             }
 
-            # CRITICAL OS FIX: Force Windows to clear size caching and read new limits
+            # Force Windows to clear size caching and read new limits
             Update-Disk -Number $Partition.DiskNumber -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 3
 
@@ -174,7 +174,7 @@ try {
             Write-Host "Successfully expanded Drive ${DriveLetter}: to maximum size of $([math]::Round($SupportedSize.SizeMax / 1GB, 2)) GB"
         }
 
-    } -ArgumentList $disk_action, $DriveLetter
+    } -ArgumentList $disk_action, $DriveLetter, $SizeGB
 
 }
 finally {
