@@ -128,7 +128,9 @@ $resizeJob = {
         Add-PSSnapin NutanixCmdletsPSSnapin
     }
 
-    $securePass = $pass | ConvertTo-SecureString -AsPlainText -Force
+    $creds = New-Object System.Security.SecureString
+    foreach ($char in $pass.ToCharArray()) { $creds.AppendChar($char) }
+    $creds.MakeReadOnly()
     $Status = "failed"
     $CurrentCPU = "N/A"
     $CurrentMemGB = "N/A"
