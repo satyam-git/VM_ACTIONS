@@ -60,7 +60,7 @@ try {
                 }
                 if (-not $isOff) { throw "VM failed to shut down gracefully." }
             }
-            
+             Start-Sleep -Seconds 30
             Restore-NTNXVirtualMachine -Vmid $vm.uuid -SnapshotUuid $snap.uuid -ErrorAction Stop | Out-Null
             Set-NTNXVMPowerOn -Vmid $vm.uuid -ErrorAction Stop | Out-Null
             Write-Host "SUCCESS: Restore completed"
