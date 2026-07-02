@@ -3,19 +3,27 @@ name: Nutanix VM Disk Resizing
 on:
   workflow_dispatch:
     inputs:
-      pe_ip:
-        description: "Prism Element / CVM IP (Support comma-separated list)"
+      site_name:
+        description: "Site Name"
         required: true
-        type: string
+        default: "Banglore"
+        type: choice
+        options:
+          - Banglore
+          - Chennai
+          - CPune
       vmname:
         description: "VM Name(s) (Support comma-separated list, e.g. test1,test2)"
         required: true
         type: string
       disk_action:
-        description: "Disk Action (Support comma-separated list, e.g. add,extend)"
+        description: "Disk Action"
         required: true
         default: "add"
-        type: string
+        type: choice
+        options:
+          - add
+          - extend
       SizeGB:
         description: "Disk Size in GB (Support comma-separated list, e.g. 10,20)"
         required: true
@@ -68,7 +76,7 @@ jobs:
           LOCAL_PASSWORD: ${{ secrets.LOCAL_PASSWORD }}
         run: |
           & "$env:GITHUB_WORKSPACE\Scripts\Nutanix VM Resize Disk.ps1" `
-            -pe_ip "${{ inputs.pe_ip }}" `
+            -site_name "${{ inputs.site_name }}" `
             -vmname "${{ inputs.vmname }}" `
             -disk_action "${{ inputs.disk_action }}" `
             -SizeGB "${{ inputs.SizeGB }}" `
