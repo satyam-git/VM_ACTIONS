@@ -186,7 +186,7 @@ function Invoke-DiskProvisioning {
                 $Partition = New-Partition -DiskNumber $Disk.Number -DriveLetter $DriveLetter -UseMaximumSize
                 Format-Volume -Partition $Partition -FileSystem NTFS -Confirm:$false -Force
                 
-                Write-Host "Successfully initialized RAW Disk \$($Disk.Number) and mapped to Drive ${DriveLetter}:"
+                Write-Host "Successfully initialized RAW Disk $($Disk.Number) and mapped to Drive ${DriveLetter}:"
             }
             else {
                 $Partition = Get-Partition -DriveLetter $DriveLetter
@@ -198,18 +198,28 @@ function Invoke-DiskProvisioning {
                 Update-Disk -Number $Partition.DiskNumber -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds 3
 
+                # Refresh partition info after Update-Disk
+                $Partition = Get-Partition -DiskNumber $Partition.DiskNumber -PartitionNumber $Partition.PartitionNumber
+
                 # Query the expanded physical disk bounds
                 $SupportedSize = Get-PartitionSupportedSize `
                     -DiskNumber $Partition.DiskNumber `
                     -PartitionNumber $Partition.PartitionNumber
 
-                # Extend partition to maximum size
-                Resize-Partition `
-                    -DiskNumber $Partition.DiskNumber `
-                    -PartitionNumber $Partition.PartitionNumber `
-                    -Size $SupportedSize.SizeMax
+                # Only resize if the new maximum size is larger than the current partition size by at least 1MB
+                $SizeDifference = $SupportedSize.SizeMax - $Partition.Size
+                if ($SizeDifference -ge 1MB) {
+                    # Extend partition to maximum size
+                    Resize-Partition `
+                        -DiskNumber $Partition.DiskNumber `
+                        -PartitionNumber $Partition.PartitionNumber `
+                        -Size $SupportedSize.SizeMax
 
-                Write-Host "Successfully expanded Drive ${DriveLetter}: to maximum size of \$([math]::Round($SupportedSize.SizeMax / 1GB, 2)) GB"
+                    Write-Host "Successfully expanded Drive ${DriveLetter}: to maximum size of $([math]::Round($SupportedSize.SizeMax / 1GB, 2)) GB"
+                }
+                else {
+                    Write-Host "Drive ${DriveLetter}: is already at the maximum possible size of $([math]::Round($Partition.Size / 1GB, 2)) GB (difference is less than 1MB). Skipping resize."
+                }
             }
 
         } -ArgumentList $current_disk_action, $current_DriveLetter
