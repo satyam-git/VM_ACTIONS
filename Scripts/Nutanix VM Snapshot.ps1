@@ -1,10 +1,9 @@
 param($JsonInputs)
 $data = $JsonInputs | ConvertFrom-Json
 
-# Helper: Load Nutanix Cmdlets
 function Initialize-Nutanix {
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
-        Add-PSSnapin NutanixCmdletsPSSnapin
+        Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
     }
 }
 
@@ -36,7 +35,7 @@ try {
             Remove-NTNXSnapshot -Uuid $snap.uuid -ErrorAction Stop | Out-Null
             Write-Output "SUCCESS: Deleted snapshot '$snapName'"
         }
-        "3" { # RESTORE (With graceful shutdown, wait, and verify)
+        "3" { # RESTORE
             $snap = Get-NTNXSnapshot | Where-Object { $_.vmUuid -eq $vm.uuid -and $_.snapshotName -eq $snapName }
             if (-not $snap) { throw "Snapshot '$snapName' not found." }
 
@@ -48,15 +47,19 @@ try {
                 $isOff = $false
                 for($i=0; $i -lt 30; $i++) {
                     Start-Sleep -Seconds 10
-                    if ((Get-NTNXVM -Vmid $vm.uuid).powerState -eq "OFF") { $isOff = $true; break }
+                    $checkVm = Get-NTNXVM -Vmid $vm.uuid
+                    if ($checkVm.powerState -eq "OFF") { $isOff = $true; break }
+                    Write-Output "Waiting for graceful shutdown... ($(($i+1)*10)s)"
                 }
                 if (-not $isOff) { throw "VM failed to shut down gracefully." }
             }
             
+            # MANDATORY DELAY: Allow hypervisor to release disk locks
             Write-Output "Waiting 30 seconds before initiating restore..."
             Start-Sleep -Seconds 30
             
             Restore-NTNXVirtualMachine -Vmid $vm.uuid -SnapshotUuid $snap.uuid -ErrorAction Stop | Out-Null
+            
             Set-NTNXVMPowerOn -Vmid $vm.uuid -ErrorAction Stop | Out-Null
             Write-Output "SUCCESS: Restore completed"
         }
