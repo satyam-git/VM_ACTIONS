@@ -318,13 +318,14 @@ for ($i = 0; $i -lt $Count; $i++) {
         Write-Error "[VM $current_vmname] Failed with error: $($_.Exception.Message)"
         $AnyFailed = $true
         
+        # Analyze error text to detect VM Not Found situations cleanly
         $errMessage = $_.Exception.Message
         $statusVal = "failed"
-        if ($errMessage -like "*not found*" -and ($errMessage -like "*VM*" -or $errMessage -like "*VirtualMachine*")) {
+        if ($errMessage -like "*not found*" -and ($errMessage -like "*VM*" -or $errMessage -like "*VirtualMachine*" -or $errMessage -like "*$current_vmname*")) {
             $statusVal = "VM Not Found"
-        } elseif ($errMessage -like "*NotFound*" -and ($errMessage -like "*VM*" -or $errMessage -like "*VirtualMachine*")) {
+        } elseif ($errMessage -like "*NotFound*" -and ($errMessage -like "*VM*" -or $errMessage -like "*VirtualMachine*" -or $errMessage -like "*$current_vmname*")) {
             $statusVal = "VM Not Found"
-        } elseif ($errMessage -like "*does not exist*" -and ($errMessage -like "*VM*" -or $errMessage -like "*VirtualMachine*")) {
+        } elseif ($errMessage -like "*does not exist*" -and ($errMessage -like "*VM*" -or $errMessage -like "*VirtualMachine*" -or $errMessage -like "*$current_vmname*")) {
             $statusVal = "VM Not Found"
         }
         
@@ -357,7 +358,16 @@ if ($env:GITHUB_STEP_SUMMARY) {
         $act = $res."Action"
         $sz = $res."Size"
         $stat = $res."Status"
-        $statusFormatted = if ($stat -eq "successful") { ":green_circle: Successful" } elseif ($stat -eq "VM Not Found") { ":yellow_circle: VM Not Found" } else { ":red_circle: Failed" }
+        
+        # Format status badge visually
+        $statusFormatted = if ($stat -eq "successful") { 
+            ":green_circle: Successful" 
+        } elseif ($stat -eq "VM Not Found") { 
+            ":yellow_circle: VM Not Found" 
+        } else { 
+            ":red_circle: Failed" 
+        }
+        
         $md += "| $site | $vm | $act | $sz GB | $statusFormatted |"
     }
     $md | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
