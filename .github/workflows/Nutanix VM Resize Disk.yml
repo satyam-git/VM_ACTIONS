@@ -70,8 +70,8 @@ jobs:
       - name: Execute Disk Provisioning
         shell: powershell
         env:
-          PE_USERNAME: ${{ secrets.PE_USERNAME }}
-          PE_PASSWORD: ${{ secrets.PE_PASSWORD }}
+          PE_USERNAME: ${{ secrets.INFY_ADMIN_USER }}
+          PE_PASSWORD: ${{ secrets.INFY_ADMIN_PASS }}
           LOCAL_USERNAME: ${{ secrets.LOCAL_USERNAME }}
           LOCAL_PASSWORD: ${{ secrets.LOCAL_PASSWORD }}
         run: |
