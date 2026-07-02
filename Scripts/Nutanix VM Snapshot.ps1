@@ -7,7 +7,7 @@ function Initialize-Nutanix {
     }
 }
 
-$siteMap = @{ "Bangalore" = "192.168.136.50" }
+$siteMap = @{ "Bangalore" = "192.168.136.50"; "Pune" = "x.x.x.x"; "Chennai" = "x.x.x.x" }
 $site = $data.s1
 $vmName = $data.v1
 $op = $data.op # 1=Create, 2=Delete, 3=Restore
@@ -22,10 +22,6 @@ try {
     if (-not $vm) { throw "VM '$vmName' not found." }
 
     $snap = Get-NTNXSnapshot | Where-Object { $_.vmUuid -eq $vm.uuid -and $_.snapshotName -eq $snapName }
-    if (-not $snap) { throw "Snapshot '$snapName' not found." }
-    
-    # Use the base UUID for the restore
-    $snapId = $snap.uuid
 
     switch ($op) {
         "1" { # CREATE
@@ -33,23 +29,30 @@ try {
             $spec.vmUuid = $vm.uuid
             $spec.snapshotName = $snapName
             New-NTNXSnapshot -SnapshotSpecs $spec -ErrorAction Stop | Out-Null
-            Write-Host "SUCCESS: Snapshot '$snapName' Created"
+            Write-Host "SUCCESS: Created snapshot '$snapName'"
         }
         "2" { # DELETE
-            Remove-NTNXSnapshot -Uuid $snapId -ErrorAction Stop | Out-Null
-            Write-Host "SUCCESS: Snapshot '$snapName' Deleted"
+            if (-not $snap) { throw "Snapshot '$snapName' not found." }
+            Remove-NTNXSnapshot -Uuid $snap.uuid -ErrorAction Stop | Out-Null
+            Write-Host "SUCCESS: Deleted snapshot '$snapName'"
         }
-        "3" { # RESTORE
-            Write-Host "Shutting down VM..."
+        "3" { # RESTORE (Clone Method)
+            if (-not $snap) { throw "Snapshot '$snapName' not found." }
+            
+            # Shutdown
             Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
             Start-Sleep -Seconds 45
             
-            # Use Restore-NTNXVM, which is the correct command for VM Snapshots
-            # It does not require PdName.
-            Write-Host "Restoring VM using Restore-NTNXVM..."
-            Restore-NTNXVM -Vmid $vm.uuid -SnapshotUuid $snapId -ErrorAction Stop | Out-Null
+            # Remove old VM and Clone from Snapshot
+            Remove-NTNXVM -Vmid $vm.uuid -ErrorAction Stop | Out-Null
             
-            Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ON -ErrorAction Stop | Out-Null
+            $cloneSpec = New-NTNXObject -Name VmCloneSpecDTO
+            $cloneSpec.snapshotUuid = $snap.uuid
+            $cloneSpec.vmName = $vmName
+            New-NTNXVM -VmCloneSpec $cloneSpec -ErrorAction Stop | Out-Null
+            
+            $newVm = Get-NTNXVM -SearchString $vmName | Where-Object { $_.vmName -eq $vmName } | Select-Object -First 1
+            Set-NTNXVMPowerOn -Vmid $newVm.uuid -ErrorAction Stop | Out-Null
             Write-Host "SUCCESS: Restore completed"
         }
     }
