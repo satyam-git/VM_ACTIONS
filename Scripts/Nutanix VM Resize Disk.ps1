@@ -11,7 +11,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$SizeGB,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $false)]
     [string]$DiskAddr = "none",
 
     [Parameter(Mandatory = $true)]
@@ -90,8 +90,8 @@ function Invoke-DiskProvisioning {
         # 1. NUTANIX CLUSTER DISK CONFIGURATION via REST API
         # ==========================================
         # Find VM UUID
-        Write-Host "Connecting to Prism Element REST API at https://$current_pe_ip:9440..."
-        $vmUrl = "https://$current_pe_ip:9440/api/nutanix/v2.0/vms?filter=vm_name==$current_vmname"
+        Write-Host "Connecting to Prism Element REST API at https://$($current_pe_ip):9440..."
+        $vmUrl = "https://$($current_pe_ip):9440/api/nutanix/v2.0/vms?filter=vm_name==$current_vmname"
         $vmResult = Invoke-RestMethod -Uri $vmUrl -Method Get -Headers $headers
         if (-not $vmResult -or -not $vmResult.entities -or $vmResult.entities.Count -eq 0) {
             throw "VM Not Found: VM '$current_vmname' was not found on the Nutanix cluster."
@@ -103,10 +103,10 @@ function Invoke-DiskProvisioning {
 
         if ($current_disk_action -eq "add") {
             # Find Best Storage Container
-            $containerUrl = "https://$current_pe_ip:9440/api/nutanix/v2.0/containers"
+            $containerUrl = "https://$($current_pe_ip):9440/api/nutanix/v2.0/containers"
             $containerResult = Invoke-RestMethod -Uri $containerUrl -Method Get -Headers $headers
             
-            $clusterUrl = "https://$current_pe_ip:9440/api/nutanix/v2.0/cluster"
+            $clusterUrl = "https://$($current_pe_ip):9440/api/nutanix/v2.0/cluster"
             $clusterDetails = Invoke-RestMethod -Uri $clusterUrl -Method Get -Headers $headers
             $Prefix = $clusterDetails.name.Substring(0,[math]::Min(3,$clusterDetails.name.Length))
 
@@ -137,7 +137,7 @@ function Invoke-DiskProvisioning {
                 }
             } | ConvertTo-Json -Depth 5
 
-            $attachUrl = "https://$current_pe_ip:9440/api/nutanix/v2.0/vms/$vmUuid/disks/attach"
+            $attachUrl = "https://$($current_pe_ip):9440/api/nutanix/v2.0/vms/$vmUuid/disks/attach"
             Write-Host "Dispatching disk attach POST request..."
             $task = Invoke-RestMethod -Uri $attachUrl -Method Post -Headers $headers -Body $body
         }
@@ -163,7 +163,7 @@ function Invoke-DiskProvisioning {
                 )
             } | ConvertTo-Json -Depth 5
 
-            $updateUrl = "https://$current_pe_ip:9440/api/nutanix/v2.0/vms/$vmUuid"
+            $updateUrl = "https://$($current_pe_ip):9440/api/nutanix/v2.0/vms/$vmUuid"
             Write-Host "Dispatching disk update/resize PUT request..."
             $task = Invoke-RestMethod -Uri $updateUrl -Method Put -Headers $headers -Body $body
         }
@@ -175,7 +175,7 @@ function Invoke-DiskProvisioning {
         $taskUuid = $task.task_uuid
         Write-Host "Nutanix REST Task Created: $taskUuid. Polling for completion..."
 
-        $taskUrl = "https://$current_pe_ip:9440/api/nutanix/v2.0/tasks/$taskUuid"
+        $taskUrl = "https://$($current_pe_ip):9440/api/nutanix/v2.0/tasks/$taskUuid"
         $taskStatus = "Queued"
         $timeout = 120
         $elapsed = 0
@@ -195,24 +195,33 @@ function Invoke-DiskProvisioning {
         # ==========================================
         # 2. WINDOWS GUEST AUTOMATION (OS LAYER)
         # ==========================================
+        $GuestSecurePassword = ConvertTo-SecureString $env:LOCAL_PASSWORD -AsPlainText -Force
+        $GuestCredential = New-Object System.Management.Automation.PSCredential($env:LOCAL_USERNAME,$GuestSecurePassword)
+
         Write-Host "Waiting 20 seconds for Nutanix disk hotplug/resize action to commit on Guest OS..."
         Start-Sleep -Seconds 20
 
-        Write-Host "Establishing remote WinRM session to Guest OS at $current_GuestIP..."
-        $SecureLocalPass = ConvertTo-SecureString $env:LOCAL_PASSWORD -AsPlainText -Force
-        $GuestCred = New-Object PSCredential ($env:LOCAL_USERNAME,$SecureLocalPass)
+        Invoke-Command -ComputerName $current_GuestIP -Credential $GuestCredential -ScriptBlock {
+            param($Action, $DriveLetter)
 
-        Invoke-Command -ComputerName $current_GuestIP -Credential $GuestCred -ErrorAction Stop -ScriptBlock {
-            param($disk_action_param, $DriveLetter)
+            # Force dynamic disk and storage layer re-discovery
+            try {
+                Update-StorageProviderCache -DiscoveryLevel Full -ErrorAction SilentlyContinue
+            } catch {}
+            
+            "rescan" | diskpart | Out-Null
+            Start-Sleep -Seconds 5
 
-            Write-Host "[GuestOS] Successfully authenticated remote session. Running OS disk alignment tasks..."
-
-            if ($disk_action_param -eq "add") {
+            if ($Action -eq "add") {
                 $Disk = $null
-                # Retries to discover hotplugged disks (supporting RAW, None, Unknown, or Offline)
-                for ($attempt = 1; $attempt -le 6; $attempt++) {
-                    Write-Host "[GuestOS] Scanning for newly hot-plugged raw or offline disk (Attempt $attempt of 6)..."
-                    try { Update-StorageProviderCache -DiscoveryLevel Full -ErrorAction SilentlyContinue } catch {}
+                $maxAttempts = 6
+                for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+                    Write-Host "Scanning for newly hot-plugged RAW or Offline disk (Attempt $attempt of $maxAttempts)..."
+                    
+                    try {
+                        Update-StorageProviderCache -DiscoveryLevel Full -ErrorAction SilentlyContinue
+                    } catch {}
+                    
                     "rescan" | diskpart | Out-Null
                     Start-Sleep -Seconds 5
                     
@@ -288,13 +297,17 @@ function Invoke-DiskProvisioning {
     }
 }
 
-# --- Helper Function: Converts comma-separated input strings into dynamic PowerShell arrays ---
+# --- Parse Comma-Separated Multi-Valued Inputs ---
 function Convert-ToArray {
-    param([string]$inputStr)
-    if ([string]::IsNullOrWhiteSpace($inputStr)) {
+    param([string]$inputString)
+    if ([string]::IsNullOrWhiteSpace($inputString)) {
         return @()
     }
-    $trimmed = $inputStr.Split(',').ForEach({ $_.Trim() })
+    $parts = $inputString.Split(',')
+    $trimmed = @()
+    foreach ($p in $parts) {
+        $trimmed += $p.Trim()
+    }
     return ,$trimmed
 }
 
@@ -395,7 +408,6 @@ for ($i = 0; $i -lt $Count; $i++) {
 Write-Host "`n=============================================================="
 Write-Host "                DISK PROVISIONING SUMMARY REPORT              "
 Write-Host "=============================================================="
-$ExecutionResults | Format-Table -AutoSize
 $ExecutionResults | Format-Table -AutoSize
 Write-Host "=============================================================="
 
