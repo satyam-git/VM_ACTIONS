@@ -123,7 +123,7 @@ function Invoke-DiskProvisioning {
         Write-Host "Nutanix ACLI Output: $($Result.Output)"
 
         # Error handling for raw ACLI failures
-        if ($Result.Output -like "*Error:*") {
+        if ($Result.Output -like "*Error:*" -or $Result.Output -like "*NotFound:*" -or $Result.Output -like "*not found*") {
             throw "Nutanix ACLI operation failed: $($Result.Output)"
         }
 
@@ -318,12 +318,22 @@ for ($i = 0; $i -lt $Count; $i++) {
         Write-Error "[VM $current_vmname] Failed with error: $($_.Exception.Message)"
         $AnyFailed = $true
         
+        $errMessage = $_.Exception.Message
+        $statusVal = "failed"
+        if ($errMessage -like "*not found*" -and ($errMessage -like "*VM*" -or $errMessage -like "*VirtualMachine*")) {
+            $statusVal = "VM Not Found"
+        } elseif ($errMessage -like "*NotFound*" -and ($errMessage -like "*VM*" -or $errMessage -like "*VirtualMachine*")) {
+            $statusVal = "VM Not Found"
+        } elseif ($errMessage -like "*does not exist*" -and ($errMessage -like "*VM*" -or $errMessage -like "*VirtualMachine*")) {
+            $statusVal = "VM Not Found"
+        }
+        
         $ExecutionResults += [PSCustomObject]@{
             "Site Name" = $current_site_name
             "VMName"    = $current_vmname
             "Action"    = $current_disk_action
             "Size"      = $current_SizeGB
-            "Status"    = "failed"
+            "Status"    = $statusVal
         }
     }
 }
@@ -347,7 +357,7 @@ if ($env:GITHUB_STEP_SUMMARY) {
         $act = $res."Action"
         $sz = $res."Size"
         $stat = $res."Status"
-        $statusFormatted = if ($stat -eq "successful") { ":green_circle: Successful" } else { ":red_circle: Failed" }
+        $statusFormatted = if ($stat -eq "successful") { ":green_circle: Successful" } elseif ($stat -eq "VM Not Found") { ":yellow_circle: VM Not Found" } else { ":red_circle: Failed" }
         $md += "| $site | $vm | $act | $sz GB | $statusFormatted |"
     }
     $md | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
