@@ -45,13 +45,9 @@ on:
 jobs:
   provision-disk:
     runs-on: self-hosted
-    steps:
-      - name: Set up job
-        run: |
-          echo "Starting disk provisioning workflow..."
 
-      - name: Run actions/checkout@v4
-        uses: actions/checkout@v4
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Install Posh-SSH
         shell: powershell
