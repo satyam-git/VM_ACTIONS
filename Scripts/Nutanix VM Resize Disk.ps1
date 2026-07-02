@@ -122,7 +122,7 @@ function Invoke-DiskProvisioning {
         $Result = Invoke-SSHCommand -SessionId $Session.SessionId -Command $AcliCommand
         Write-Host "Nutanix ACLI Output: $($Result.Output)"
 
-        # Error handling for raw ACLI failures (Specifically catch VM Not Found early!)
+        # Error handling for raw ACLI failures
         if ($Result.Output -like "*Error:*" -or $Result.Output -like "*NotFound:*" -or $Result.Output -like "*not found*" -or $Result.Output -like "*Unknown name:*" -or $Result.Output -like "*does not exist*") {
             if ($Result.Output -like "*Unknown name:*" -or $Result.Output -like "*does not exist*" -or $Result.Output -like "*not found*") {
                 throw "VM Not Found: VM '$current_vmname' was not found on the Nutanix cluster. Details: $($Result.Output)"
@@ -318,9 +318,6 @@ for ($i = 0; $i -lt $Count; $i++) {
         }
     }
     catch {
-        Write-Error "[VM $current_vmname] Failed with error: $($_.Exception.Message)"
-        $AnyFailed = $true
-        
         $errMessage = $_.Exception.Message
         $statusVal = "failed"
         if ($errMessage -like "*VM Not Found*" -or $errMessage -like "*Unknown name:*") {
@@ -331,6 +328,13 @@ for ($i = 0; $i -lt $Count; $i++) {
             $statusVal = "VM Not Found"
         } elseif ($errMessage -like "*does not exist*" -and ($errMessage -like "*VM*" -or $errMessage -like "*VirtualMachine*" -or $errMessage -like "*$current_vmname*")) {
             $statusVal = "VM Not Found"
+        }
+        
+        if ($statusVal -eq "VM Not Found") {
+            Write-Warning "[VM $current_vmname] Not Found: $errMessage"
+        } else {
+            Write-Error "[VM $current_vmname] Failed with error: $errMessage"
+            $AnyFailed = $true
         }
         
         $ExecutionResults += [PSCustomObject]@{
