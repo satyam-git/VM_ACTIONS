@@ -1,23 +1,31 @@
-name: Nutanix Snapshot Automation
+name: Nutanix Snapshot Cmdlet Ops
 
 on:
   workflow_dispatch:
     inputs:
-      s1: { description: 'Site Name', required: true, type: choice, options: [Bangalore, Pune, Chennai] }
-      v1: { description: 'VM Name', required: true, type: string }
-      op: { description: 'Operation (1:Create, 2:Delete, 3:Restore)', required: true, type: choice, options: [1, 2, 3] }
-      sn1: { description: 'Snapshot Name', required: true, type: string }
+      prism_ip: { description: 'Prism IP', required: true }
+      vm_name: { description: 'VM Name', required: true }
+      op: { description: 'Op (1:Create, 2:Delete, 3:Restore)', required: true, options: ['1', '2', '3'] }
+      snap_name: { description: 'Snapshot Name', required: true }
 
 jobs:
-  run-snapshot-job:
+  nutanix-cmdlet-job:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-      - name: Run Snapshot Operation
+      
+      - name: Execute Snapshot Cmdlets
         shell: powershell
         env:
-          PE_USER: ${{ secrets.PE_Username }}
           PE_PASS: ${{ secrets.PE_Password }}
-          INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
-          & "$env:GITHUB_WORKSPACE\Scripts\Nutanix VM Snapshot.ps1" -JsonInputs $env:INPUTS_JSON
+          # Use your established path
+          & "$env:GITHUB_WORKSPACE\Scripts\Nutanix VM Snapshot.ps1" `
+            -PrismIP "${{ github.event.inputs.prism_ip }}" `
+            -Username "${{ secrets.PE_Username }}" `
+            -Password $env:PE_PASS `
+            -VMName "${{ github.event.inputs.vm_name }}" `
+            -Operation "${{ github.event.inputs.op }}" `
+            -SnapshotName "${{ github.event.inputs.snap_name }}"
+
+          
