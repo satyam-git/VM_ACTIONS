@@ -1,0 +1,23 @@
+name: Nutanix VM Snapshot Automation
+
+on:
+  workflow_dispatch:
+    inputs:
+      s1: { description: 'Site Name', required: true, type: choice, options: [Bangalore] }
+      v1: { description: 'VM Name', required: true, type: string }
+      op: { description: 'Operation', required: true, type: choice, options: [1, 2, 3] } # 1:Create, 2:Delete, 3:Restore
+      sn1: { description: 'Snapshot Name', required: true, type: string }
+
+jobs:
+  run-snapshot-job:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Snapshot Operation
+        shell: powershell
+        env:
+          PE_USER: ${{ secrets.PE_Username }}
+          PE_PASS: ${{ secrets.PE_Password }}
+          INPUTS_JSON: ${{ toJson(github.event.inputs) }}
+        run: |
+          & "$env:GITHUB_WORKSPACE\Scripts\Nutanix VM Snapshot.ps1" -JsonInputs $env:INPUTS_JSON
