@@ -20,4 +20,4 @@ jobs:
           PE_PASS: ${{ secrets.PE_Password }}
           INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
-          & "$env:GITHUB_WORKSPACE\Scripts\Nutanix_VM_Snapshot.ps1" -JsonInputs $env:INPUTS_JSON
+          & "$env:GITHUB_WORKSPACE\Scripts\Nutanix VM Snapshot.ps1" -JsonInputs $env:INPUTS_JSON
