@@ -1,7 +1,6 @@
 param($JsonInputs)
 $data = $JsonInputs | ConvertFrom-Json
 
-# Helper: Load Nutanix Cmdlets
 function Initialize-Nutanix {
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
         Add-PSSnapin NutanixCmdletsPSSnapin
@@ -11,7 +10,7 @@ function Initialize-Nutanix {
 $siteMap = @{ "Bangalore" = "192.168.136.50" }
 $site = $data.s1
 $vmName = $data.v1
-$op = $data.op 
+$op = $data.op # 1=Create, 2=Delete, 3=Restore
 $snapName = $data.sn1
 
 try {
@@ -22,14 +21,11 @@ try {
     $vm = Get-NTNXVM -SearchString $vmName | Where-Object { $_.vmName -eq $vmName } | Select-Object -First 1
     if (-not $vm) { throw "VM '$vmName' not found." }
 
-    # Find the snapshot and dynamically find the correct ID property
     $snap = Get-NTNXSnapshot | Where-Object { $_.vmUuid -eq $vm.uuid -and $_.snapshotName -eq $snapName }
     if (-not $snap) { throw "Snapshot '$snapName' not found." }
     
-    # Detect ID property: Check for 'uuid', 'snapshotUuid', or 'id'
+    # Use the base UUID for the restore
     $snapId = $snap.uuid
-    if ($null -eq $snapId) { $snapId = $snap.snapshotUuid }
-    if ($null -eq $snapId) { $snapId = $snap.id }
 
     switch ($op) {
         "1" { # CREATE
@@ -48,9 +44,10 @@ try {
             Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
             Start-Sleep -Seconds 45
             
-            # Using the detected ID property
-            Write-Host "Restoring snapshot using ID: $snapId"
-            Restore-NTNXSnapshot -SnapshotId $snapId -ErrorAction Stop | Out-Null
+            # Use Restore-NTNXVM, which is the correct command for VM Snapshots
+            # It does not require PdName.
+            Write-Host "Restoring VM using Restore-NTNXVM..."
+            Restore-NTNXVM -Vmid $vm.uuid -SnapshotUuid $snapId -ErrorAction Stop | Out-Null
             
             Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ON -ErrorAction Stop | Out-Null
             Write-Host "SUCCESS: Restore completed"
