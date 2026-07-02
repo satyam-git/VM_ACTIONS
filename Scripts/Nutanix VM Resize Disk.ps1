@@ -186,7 +186,7 @@ function Invoke-DiskProvisioning {
                 $Partition = New-Partition -DiskNumber $Disk.Number -DriveLetter $DriveLetter -UseMaximumSize
                 Format-Volume -Partition $Partition -FileSystem NTFS -Confirm:$false -Force
                 
-                Write-Host "Successfully initialized RAW Disk $($Disk.Number) and mapped to Drive ${DriveLetter}:"
+                Write-Host "Successfully initialized RAW Disk \$($Disk.Number) and mapped to Drive ${DriveLetter}:"
             }
             else {
                 $Partition = Get-Partition -DriveLetter $DriveLetter
@@ -209,7 +209,7 @@ function Invoke-DiskProvisioning {
                     -PartitionNumber $Partition.PartitionNumber `
                     -Size $SupportedSize.SizeMax
 
-                Write-Host "Successfully expanded Drive ${DriveLetter}: to maximum size of $([math]::Round($SupportedSize.SizeMax / 1GB, 2)) GB"
+                Write-Host "Successfully expanded Drive ${DriveLetter}: to maximum size of \$([math]::Round($SupportedSize.SizeMax / 1GB, 2)) GB"
             }
 
         } -ArgumentList $current_disk_action, $current_DriveLetter
@@ -337,7 +337,7 @@ if ($env:GITHUB_STEP_SUMMARY) {
         $act = $res."Action"
         $sz = $res."Size"
         $stat = $res."Status"
-        $statusFormatted = if ($stat -eq "successful") { "🟢 Successful" } else { "🔴 Failed" }
+        $statusFormatted = if ($stat -eq "successful") { ":green_circle: Successful" } else { ":red_circle: Failed" }
         $md += "| $site | $vm | $act | $sz GB | $statusFormatted |"
     }
     $md | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
