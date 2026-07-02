@@ -35,7 +35,7 @@ try {
             Remove-NTNXSnapshot -Uuid $snap.uuid -ErrorAction Stop | Out-Null
             Write-Host "SUCCESS: Deleted snapshot '$snapName'"
         }
-        "3" { # RESTORE (With Graceful Verification)
+        "3" { # RESTORE
             $snap = Get-NTNXSnapshot | Where-Object { $_.vmUuid -eq $vm.uuid -and $_.snapshotName -eq $snapName }
             if (-not $snap) { throw "Snapshot '$snapName' not found." }
 
@@ -43,7 +43,7 @@ try {
                 Write-Host "Initiating graceful shutdown..."
                 Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction Stop | Out-Null
                 
-                # Verification loop: poll power status every 10s for up to 5 mins
+                # Verification loop
                 $maxRetries = 30
                 $retryCount = 0
                 $isOff = $false
@@ -60,8 +60,13 @@ try {
                 }
                 if (-not $isOff) { throw "VM failed to shut down gracefully." }
             }
-             Start-Sleep -Seconds 30
+            
+            # --- Added 30 second delay here ---
+            Write-Host "Waiting 30 seconds before initiating restore..."
+            Start-Sleep -Seconds 30
+            
             Restore-NTNXVirtualMachine -Vmid $vm.uuid -SnapshotUuid $snap.uuid -ErrorAction Stop | Out-Null
+            
             Set-NTNXVMPowerOn -Vmid $vm.uuid -ErrorAction Stop | Out-Null
             Write-Host "SUCCESS: Restore completed"
         }
