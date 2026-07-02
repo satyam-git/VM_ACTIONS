@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string]$pe_ip,
+    [string]$site_name,
 
     [Parameter(Mandatory = $true)]
     [string]$vmname,
@@ -35,7 +35,7 @@ if ([string]::IsNullOrWhiteSpace($env:PE_PASSWORD)) { throw "PE_PASSWORD secret 
 if ([string]::IsNullOrWhiteSpace($env:LOCAL_USERNAME)) { throw "LOCAL_USERNAME secret not found" }
 if ([string]::IsNullOrWhiteSpace($env:LOCAL_PASSWORD)) { throw "LOCAL_PASSWORD secret not found" }
 
-# Helper function to execute the main provisioning logic for an individual VM
+# Helper function to execute the main provisioning logic
 function Invoke-DiskProvisioning {
     param(
         [string]$current_pe_ip,
@@ -59,160 +59,108 @@ function Invoke-DiskProvisioning {
         throw "disk_action must be 'add' or 'extend'. Got '$current_disk_action'."
     }
 
-    # --- Dynamic TrustedHosts Registration ---
-    try {
-        Write-Host "Configuring WinRM TrustedHosts for target guest: $current_GuestIP..."
-        if (Test-Path "WSMan:\localhost\Client\TrustedHosts") {
-            $CurrentTrusted = (Get-Item WSMan:\localhost\Client\TrustedHosts).Value
-            if ($CurrentTrusted -ne "*" -and $CurrentTrusted -notlike "*$current_GuestIP*") {
-                if ([string]::IsNullOrWhiteSpace($CurrentTrusted)) {
-                    Set-Item WSMan:\localhost\Client\TrustedHosts -Value $current_GuestIP -Force -Confirm:$false | Out-Null
-                } else {
-                    Set-Item WSMan:\localhost\Client\TrustedHosts -Value "$CurrentTrusted,$current_GuestIP" -Force -Confirm:$false | Out-Null
-                }
-            }
-        }
-    } catch {
-        Write-Warning "Failed to set TrustedHosts in script. Ensure runner shell is elevated, or configure it in the YAML step."
+    # Connect to Nutanix Cluster
+    Write-Host "[$current_vmname] Connecting to Prism Element at $current_pe_ip..."
+    
+    # Auto-load Nutanix Cmdlets
+    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
+        Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
     }
-
-    $SecurePassword = ConvertTo-SecureString $env:PE_PASSWORD -AsPlainText -Force
-    $Credential = New-Object PSCredential ($env:PE_USERNAME,$SecurePassword)
-
-    $Session = New-SSHSession -ComputerName $current_pe_ip -Credential $Credential -AcceptKey -Force
+    
+    # Establish Connection
+    $ClusterConnection = Connect-NTNXCluster -Servers $current_pe_ip -UserName $env:PE_USERNAME -Password $env:PE_PASSWORD -ErrorAction Stop
+    Write-Host "[$current_vmname] Connected successfully to Nutanix Prism Element."
 
     try {
-        # ==========================================
-        # 1. NUTANIX CLUSTER DISK CONFIGURATION
-        # ==========================================
+        # Check if Virtual Machine exists
+        Write-Host "[$current_vmname] Verifying VM existence..."
+        $vm = Get-NTNXVM -Name $current_vmname -ErrorAction SilentlyContinue
+        if (-not $vm) {
+            throw "Virtual Machine '$current_vmname' not found in cluster."
+        }
+
+        # Query Storage Containers to pick the one with most space
+        Write-Host "[$current_vmname] Probing cluster storage containers..."
+        $Containers = Get-NTNXContainer
+        $BestContainer = $Containers | Where-Object { $_.name -notmatch "default|container-system|template" } | 
+            Sort-Object -Property @{Expression={$_.freeCapacityBytes}; Descending=$true} | Select-Object -First 1
+
+        if (-not $BestContainer) {
+            $BestContainer = $Containers | Select-Object -First 1
+        }
+        Write-Host "[$current_vmname] Selected optimal storage container: $($BestContainer.name) with $($BestContainer.freeCapacityBytes / 1GB) GB free."
+
+        # Handle Action
         if ($current_disk_action -eq "add") {
-            if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
-                Add-PSSnapin NutanixCmdletsPSSnapin
-            }
-
-            Connect-NTNXCluster -Server $current_pe_ip -UserName $env:PE_USERNAME -Password $SecurePassword -AcceptInvalidSSLCerts | Out-Null
-
-            $ClusterDetails = Get-NTNXCluster
-            $Prefix = $ClusterDetails.name.Substring(0,[math]::Min(3,$ClusterDetails.name.Length))
-
-            $BestContainer = Get-NTNXContainer |
-            Where-Object {
-                $n = if ($_.name) { $_.name } else { $_.containerName }
-                $n -like "$Prefix*" -and $n -notmatch "NutanixManagementShare|NutaniXFitInstance|default-container"
-            } |
-            Select-Object *,@{
-                Name="FreePct"
-                Expression={
-                    $Cap=[double]$_.usageStats.'storage.capacity_bytes'
-                    $Use=[double]$_.usageStats.'storage.usage_bytes'
-                    if($Cap -gt 0){ (($Cap-$Use)/$Cap)*100 } else {0}
-                }
-            } |
-            Sort-Object FreePct -Descending |
-            Select-Object -First 1
-
-            $ContainerName = if ($BestContainer.name) { $BestContainer.name } else { $BestContainer.containerName }
-
-            $AcliCommand = "acli vm.disk_create '$current_vmname' container='$ContainerName' create_size='${current_SizeGB}G'"
+            Write-Host "[$current_vmname] Creating new virtual disk of size $current_SizeGB GB on container '$($BestContainer.name)'..."
+            $Task = New-NTNXVMDisk -Vmid $vm.uuid -ContainerName $BestContainer.name -SizeInBytes ($current_SizeGB * 1GB) -ErrorAction Stop
+            Write-Host "[$current_vmname] Disk creation initiated. Task ID: $($Task.taskUuid)"
         }
         else {
-            $AcliCommand = "acli vm.disk_update '$current_vmname' disk_addr='$current_DiskAddr' new_size='${current_SizeGB}G'"
+            Write-Host "[$current_vmname] Extending disk at SCSI address '$current_DiskAddr' to new size $current_SizeGB GB..."
+            $Disk = $vm.diskList | Where-Object { $_.diskAddress -eq $current_DiskAddr }
+            if (-not $Disk) {
+                throw "Target disk address '$current_DiskAddr' not found on VM '$current_vmname'."
+            }
+            $Task = Set-NTNXVMDisk -Vmid $vm.uuid -DiskAddress $current_DiskAddr -SizeInBytes ($current_SizeGB * 1GB) -ErrorAction Stop
+            Write-Host "[$current_vmname] Disk expansion task initiated. Task ID: $($Task.taskUuid)"
         }
 
-        $Result = Invoke-SSHCommand -SessionId $Session.SessionId -Command $AcliCommand
-        Write-Host "Nutanix ACLI Output: $($Result.Output)"
+        # Wait for Nutanix Task Completion
+        Write-Host "[$current_vmname] Waiting for Nutanix task to complete..."
+        Start-Sleep -Seconds 15
 
-        # Error handling for raw ACLI failures
-        if ($Result.Output -like "*Error:*") {
-            throw "Nutanix ACLI operation failed: $($Result.Output)"
-        }
+        # --- Guest OS Configuration (via WinRM / Posh-SSH) ---
+        Write-Host "[$current_vmname] Dispatching configuration to Windows Guest OS at $current_GuestIP..."
+        
+        $SecPassword = ConvertTo-SecureString $env:LOCAL_PASSWORD -AsPlainText -Force
+        $Credential = New-Object System.Management.Automation.PSCredential($env:LOCAL_USERNAME, $SecPassword)
 
-        # ==========================================
-        # 2. WINDOWS GUEST AUTOMATION (OS LAYER)
-        # ==========================================
-        $GuestSecurePassword = ConvertTo-SecureString $env:LOCAL_PASSWORD -AsPlainText -Force
-        $GuestCredential = New-Object System.Management.Automation.PSCredential($env:LOCAL_USERNAME,$GuestSecurePassword)
+        # Establish remote PowerShell WinRM Session or SSH session
+        $Session = New-SSHSession -ComputerName $current_GuestIP -Credential $Credential -AcceptKey -ErrorAction Stop
 
-        Write-Host "Waiting 20 seconds for Nutanix disk hotplug/resize action to commit on Guest OS..."
-        Start-Sleep -Seconds 20
-
-        Invoke-Command -ComputerName $current_GuestIP -Credential $GuestCredential -ScriptBlock {
-            param($Action, $DriveLetter)
-
-            # Force dynamic disk and storage layer re-discovery
-            try {
-                Update-StorageProviderCache -DiscoveryLevel Full -ErrorAction SilentlyContinue
-            } catch {}
+        # PowerShell Block to execute in Guest OS
+        $GuestScript = {
+            param($action, $drive)
+            Write-Output "Running remote disk manager scan..."
             
+            # Rescan Storage
             "rescan" | diskpart | Out-Null
             Start-Sleep -Seconds 5
 
-            if ($Action -eq "add") {
-                $Disk = $null
-                $maxAttempts = 6
-                for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-                    Write-Host "Scanning for newly hot-plugged RAW or Offline disk (Attempt $attempt of $maxAttempts)..."
-                    
-                    try {
-                        Update-StorageProviderCache -DiscoveryLevel Full -ErrorAction SilentlyContinue
-                    } catch {}
-                    
-                    "rescan" | diskpart | Out-Null
-                    Start-Sleep -Seconds 5
-                    
-                    $Disk = Get-Disk | Where-Object {
-                        $_.PartitionStyle -eq "RAW" -or $_.OperationalStatus -eq "Offline" -or $_.PartitionStyle -eq "None" -or $_.PartitionStyle -eq "Unknown"
-                    } | Sort-Object Number | Select-Object -First 1
-                    
-                    if ($Disk) {
-                        Write-Host "Found target disk: Number $($Disk.Number), Size $($Disk.Size), OperationalStatus $($Disk.OperationalStatus), PartitionStyle $($Disk.PartitionStyle)"
-                        break
-                    }
+            if ($action -eq "add") {
+                # Fetch raw disks (offline or RAW)
+                $rawDisks = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -or $_.OperationalStatus -eq "Offline" }
+                if (-not $rawDisks) {
+                    Write-Error "No uninitialized RAW or Offline disks found in Guest OS."
+                    exit 1
                 }
-
-                if (-not $Disk) { 
-                    Write-Host "All current disks on the Guest OS:"
-                    Get-Disk | ForEach-Object {
-                        Write-Host "Disk #$($_.Number): Size=$($_.Size), OpStatus=$($_.OperationalStatus), Style=$($_.PartitionStyle)"
-                    }
-                    throw "No RAW or Offline disk found. Please ensure the new virtual drive is recognized." 
-                }
-
-                if ($Disk.OperationalStatus -eq "Offline") {
-                    Set-Disk -Number $Disk.Number -IsOffline $false -IsReadOnly $false -ErrorAction SilentlyContinue
-                }
-
-                Initialize-Disk -Number $Disk.Number -PartitionStyle GPT
-                $Partition = New-Partition -DiskNumber $Disk.Number -DriveLetter $DriveLetter -UseMaximumSize
-                Format-Volume -Partition $Partition -FileSystem NTFS -Confirm:$false -Force
                 
-                Write-Host "Successfully initialized RAW Disk $($Disk.Number) and mapped to Drive ${DriveLetter}:"
+                $targetDisk = $rawDisks | Sort-Object -Property Number | Select-Object -First 1
+                Write-Output "Found RAW disk: Index $($targetDisk.Number)"
+
+                # Initialize, Partition and Format
+                Initialize-Disk -Number $targetDisk.Number -PartitionStyle GPT -ErrorAction Stop
+                $partition = New-Partition -DiskNumber $targetDisk.Number -UseMaximumSize -DriveLetter $drive -ErrorAction Stop
+                Format-Volume -Partition $partition -FileSystem NTFS -NewFileSystemLabel "New_Volume" -Confirm:$false -ErrorAction Stop
+                Write-Output "Successfully formatted and mapped disk to $drive`:"
             }
             else {
-                $Partition = Get-Partition -DriveLetter $DriveLetter
-                if (-not $Partition) {
-                    throw "Drive letter '${DriveLetter}:' was not found on the guest OS. Cannot extend."
+                # Extend Partition
+                Write-Output "Locating partition for Drive $drive`:"
+                $partition = Get-Partition -DriveLetter $drive -ErrorAction SilentlyContinue
+                if (-not $partition) {
+                    Write-Error "Could not locate partition for Drive $drive`:"
+                    exit 1
                 }
-
-                # CRITICAL OS FIX: Force Windows to clear size caching and read new limits
-                Update-Disk -Number $Partition.DiskNumber -ErrorAction SilentlyContinue
-                Start-Sleep -Seconds 3
-
-                # Query the expanded physical disk bounds
-                $SupportedSize = Get-PartitionSupportedSize `
-                    -DiskNumber $Partition.DiskNumber `
-                    -PartitionNumber $Partition.PartitionNumber
-
-                # Extend partition to maximum size
-                Resize-Partition `
-                    -DiskNumber $Partition.DiskNumber `
-                    -PartitionNumber $Partition.PartitionNumber `
-                    -Size $SupportedSize.SizeMax
-
-                Write-Host "Successfully expanded Drive ${DriveLetter}: to maximum size of $([math]::Round($SupportedSize.SizeMax / 1GB, 2)) GB"
+                
+                $maxSize = (Get-PartitionSupportedSize -DriveLetter $drive).SizeMax
+                Resize-Partition -DriveLetter $drive -Size $maxSize -ErrorAction Stop
+                Write-Output "Successfully extended Drive $drive`: partition to maximum supported size ($($maxSize / 1GB) GB)"
             }
+        }
 
-        } -ArgumentList $current_disk_action, $current_DriveLetter
+        $Result = Invoke-SSHCommand -SessionId $Session.SessionId -Command "powershell -Command { $GuestScript }" -ArgumentList $current_disk_action, $current_DriveLetter
 
     }
     finally {
@@ -226,33 +174,46 @@ function Invoke-DiskProvisioning {
     }
 }
 
-# --- Parse Comma-Separated Multi-Valued Inputs ---
-$PE_IPs = if ([string]::IsNullOrWhiteSpace($pe_ip)) { @() } else { $pe_ip.Split(',').ForEach({ $_.Trim() }) }
-$VMNames = if ([string]::IsNullOrWhiteSpace($vmname)) { @() } else { $vmname.Split(',').ForEach({ $_.Trim() }) }
-$DiskActions = if ([string]::IsNullOrWhiteSpace($disk_action)) { @() } else { $disk_action.Split(',').ForEach({ $_.Trim() }) }
-$Sizes = if ([string]::IsNullOrWhiteSpace($SizeGB)) { @() } else { $SizeGB.Split(',').ForEach({ $_.Trim() }) }
-$DiskAddrs = if ([string]::IsNullOrWhiteSpace($DiskAddr)) { @() } else { $DiskAddr.Split(',').ForEach({ $_.Trim() }) }
-$GuestIPs = if ([string]::IsNullOrWhiteSpace($GuestIP)) { @() } else { $GuestIP.Split(',').ForEach({ $_.Trim() }) }
-$DriveLetters = if ([string]::IsNullOrWhiteSpace($DriveLetter)) { @() } else { $DriveLetter.Split(',').ForEach({ $_.Trim() }) }
+# --- Parse Comma-Separated Multi-Valued Inputs Safely as Arrays ---
+$SiteNames = if ([string]::IsNullOrWhiteSpace($site_name)) { @() } else { @($site_name.Split(',').ForEach({ $_.Trim() })) }
+$VMNames = if ([string]::IsNullOrWhiteSpace($vmname)) { @() } else { @($vmname.Split(',').ForEach({ $_.Trim() })) }
+$DiskActions = if ([string]::IsNullOrWhiteSpace($disk_action)) { @() } else { @($disk_action.Split(',').ForEach({ $_.Trim() })) }
+$Sizes = if ([string]::IsNullOrWhiteSpace($SizeGB)) { @() } else { @($SizeGB.Split(',').ForEach({ $_.Trim() })) }
+$DiskAddrs = if ([string]::IsNullOrWhiteSpace($DiskAddr)) { @() } else { @($DiskAddr.Split(',').ForEach({ $_.Trim() })) }
+$GuestIPs = if ([string]::IsNullOrWhiteSpace($GuestIP)) { @() } else { @($GuestIP.Split(',').ForEach({ $_.Trim() })) }
+$DriveLetters = if ([string]::IsNullOrWhiteSpace($DriveLetter)) { @() } else { @($DriveLetter.Split(',').ForEach({ $_.Trim() })) }
 
-# Calculate batch execution count based on the number of VM Names provided
+# --- Code-Defined Site to PE IP mapping dictionary ---
+$SiteIPMap = @{
+    "Banglore" = "192.168.136.50"
+    "Chennai"  = "10.0.0.10"
+    "CPune"    = "10.0.0.20"
+}
+
+# We determine loop size by the number of VM Names provided
 $Count = $VMNames.Count
 if ($Count -eq 0) {
     throw "No VM Names provided for provisioning."
 }
 
-Write-Host "Detected $Count VM(s) to process based on 'vmname' list input."
+Write-Host "Detected $Count VM(s) to process based on 'vmname' input."
 
 for ($i = 0; $i -lt $Count; $i++) {
     $current_vmname = $VMNames[$i]
     
-    # Dynamic parameter indices mapping. Uses standard index or falls back to index 0 if only a single value was passed
-    $current_pe_ip = if ($i -lt $PE_IPs.Count) { $PE_IPs[$i] } else { $PE_IPs[0] }
+    # Safe index mappings with fallbacks
+    $current_site_name = if ($i -lt $SiteNames.Count) { $SiteNames[$i] } else { $SiteNames[0] }
     $current_disk_action = if ($i -lt $DiskActions.Count) { $DiskActions[$i] } else { $DiskActions[0] }
     $current_SizeGB = if ($i -lt $Sizes.Count) { $Sizes[$i] } else { $Sizes[0] }
     $current_DiskAddr = if ($i -lt $DiskAddrs.Count) { $DiskAddrs[$i] } else { $DiskAddrs[0] }
     $current_GuestIP = if ($i -lt $GuestIPs.Count) { $GuestIPs[$i] } else { $GuestIPs[0] }
     $current_DriveLetter = if ($i -lt $DriveLetters.Count) { $DriveLetters[$i] } else { $DriveLetters[0] }
+
+    # Resolve Prism Element IP address from the code-defined mapping
+    $current_pe_ip = $current_site_name
+    if ($SiteIPMap.ContainsKey($current_site_name)) {
+        $current_pe_ip = $SiteIPMap[$current_site_name]
+    }
 
     Write-Host "`n[VM $current_vmname] Starting execution ($($i + 1) of $Count)"
     try {
