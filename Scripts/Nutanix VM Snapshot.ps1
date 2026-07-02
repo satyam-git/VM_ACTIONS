@@ -35,37 +35,33 @@ try {
             Remove-NTNXSnapshot -Uuid $snap.uuid -ErrorAction Stop | Out-Null
             Write-Host "SUCCESS: Deleted snapshot '$snapName'"
         }
-        "3" { # RESTORE (Graceful Shutdown Logic)
+        "3" { # RESTORE (With Graceful Verification)
             $snap = Get-NTNXSnapshot | Where-Object { $_.vmUuid -eq $vm.uuid -and $_.snapshotName -eq $snapName }
             if (-not $snap) { throw "Snapshot '$snapName' not found." }
 
             if ($vm.powerState -eq "on") {
                 Write-Host "Initiating graceful shutdown..."
                 Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction Stop | Out-Null
-        
                 
-                # Graceful wait loop (Check status for up to 3 minutes)
-                $timeout = 180
-                $elapsed = 0
-                while ($elapsed -lt $timeout) {
+                # Verification loop: poll power status every 10s for up to 5 mins
+                $maxRetries = 30
+                $retryCount = 0
+                $isOff = $false
+                while ($retryCount -lt $maxRetries) {
                     Start-Sleep -Seconds 10
-                    $elapsed += 10
-                    $currentVm = Get-NTNXVM -Vmid $vm.uuid
-                    if ($currentVm.powerState -eq "off") {
-                        Write-Host "VM shut down gracefully."
+                    $checkVm = Get-NTNXVM -Vmid $vm.uuid
+                    if ($checkVm.powerState -eq "off") {
+                        $isOff = $true
+                        Write-Host "VM confirmed powered off."
                         break
                     }
-                    Write-Host "Waiting for shutdown... ($elapsed seconds elapsed)"
+                    $retryCount++
+                    Write-Host "Waiting for graceful shutdown... ($($retryCount * 10)s)"
                 }
-                
-                if ($currentVm.powerState -eq "on") {
-                    throw "VM failed to shut down gracefully within $timeout seconds. Manual intervention required."
-                }
+                if (-not $isOff) { throw "VM failed to shut down gracefully." }
             }
-            Start-Sleep -Seconds 30
-            # Perform Restore
-            Restore-NTNXVirtualMachine -Vmid $vm.uuid -SnapshotUuid $snap.uuid -ErrorAction Stop | Out-Null
             
+            Restore-NTNXVirtualMachine -Vmid $vm.uuid -SnapshotUuid $snap.uuid -ErrorAction Stop | Out-Null
             Set-NTNXVMPowerOn -Vmid $vm.uuid -ErrorAction Stop | Out-Null
             Write-Host "SUCCESS: Restore completed"
         }
