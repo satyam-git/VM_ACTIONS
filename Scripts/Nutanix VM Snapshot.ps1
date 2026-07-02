@@ -8,19 +8,11 @@ function Initialize-Nutanix {
     }
 }
 
-# Mapping sites to Prism Element IPs (extend as needed)
-$siteMap = @{
-    "Bangalore" = "192.168.136.50"
-}
-
+$siteMap = @{ "Bangalore" = "192.168.136.50" }
 $site = $data.s1
 $vmName = $data.v1
-$op = $data.op # 1=Create, 2=Delete, 3=Restore
+$op = $data.op 
 $snapName = $data.sn1
-
-# Setup Logging
-$logPath = Join-Path $env:GITHUB_WORKSPACE "data\snapshot_log.csv"
-if (-not (Test-Path "data")) { New-Item -ItemType Directory -Path "data" -Force | Out-Null }
 
 try {
     Initialize-Nutanix
@@ -30,7 +22,14 @@ try {
     $vm = Get-NTNXVM -SearchString $vmName | Where-Object { $_.vmName -eq $vmName } | Select-Object -First 1
     if (-not $vm) { throw "VM '$vmName' not found." }
 
-    $status = "Failed"
+    # Find the snapshot and dynamically find the correct ID property
+    $snap = Get-NTNXSnapshot | Where-Object { $_.vmUuid -eq $vm.uuid -and $_.snapshotName -eq $snapName }
+    if (-not $snap) { throw "Snapshot '$snapName' not found." }
+    
+    # Detect ID property: Check for 'uuid', 'snapshotUuid', or 'id'
+    $snapId = $snap.uuid
+    if ($null -eq $snapId) { $snapId = $snap.snapshotUuid }
+    if ($null -eq $snapId) { $snapId = $snap.id }
 
     switch ($op) {
         "1" { # CREATE
@@ -38,27 +37,28 @@ try {
             $spec.vmUuid = $vm.uuid
             $spec.snapshotName = $snapName
             New-NTNXSnapshot -SnapshotSpecs $spec -ErrorAction Stop | Out-Null
-            $status = "Snapshot '$snapName' Created"
+            Write-Host "SUCCESS: Snapshot '$snapName' Created"
         }
         "2" { # DELETE
-            $snap = Get-NTNXSnapshot | Where-Object { $_.vmUuid -eq $vm.uuid -and $_.snapshotName -eq $snapName }
-            Remove-NTNXSnapshot -Uuid $snap.uuid -ErrorAction Stop | Out-Null
-            $status = "Snapshot '$snapName' Deleted"
+            Remove-NTNXSnapshot -Uuid $snapId -ErrorAction Stop | Out-Null
+            Write-Host "SUCCESS: Snapshot '$snapName' Deleted"
         }
         "3" { # RESTORE
-            $snap = Get-NTNXSnapshot | Where-Object { $_.vmUuid -eq $vm.uuid -and $_.snapshotName -eq $snapName }
-            # Shutdown and Restore logic
+            Write-Host "Shutting down VM..."
             Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
-            Start-Sleep -Seconds 30
-            # Use Restore-NTNXVirtualMachine for VM-level snapshots
-            Restore-NTNXVirtualMachine -Vmid $vm.uuid -SnapshotUuid $snap.uuid -ErrorAction Stop | Out-Null
+            Start-Sleep -Seconds 45
+            
+            # Using the detected ID property
+            Write-Host "Restoring snapshot using ID: $snapId"
+            Restore-NTNXSnapshot -SnapshotId $snapId -ErrorAction Stop | Out-Null
+            
             Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ON -ErrorAction Stop | Out-Null
-            $status = "Snapshot '$snapName' Restored and VM Powered On"
+            Write-Host "SUCCESS: Restore completed"
         }
     }
-    "$site,$vmName,$snapName,$status" | Out-File -FilePath $logPath -Append -Encoding utf8
 } catch {
-    "$site,$vmName,$snapName,ERROR: $($_.Exception.Message)" | Out-File -FilePath $logPath -Append -Encoding utf8
+    Write-Error "CRITICAL FAILURE: $($_.Exception.Message)"
+    exit 1
 } finally {
     Disconnect-NTNXCluster -Servers * -ErrorAction SilentlyContinue
 }
