@@ -111,82 +111,97 @@ function Invoke-DiskProvisioning {
             Sort-Object FreePct -Descending |
             Select-Object -First 1
 
-            if (-not $BestContainer) {
-                throw "No eligible storage container found matching prefix '$Prefix'"
-            }
-
             $ContainerName = if ($BestContainer.name) { $BestContainer.name } else { $BestContainer.containerName }
-            Write-Host "Auto-selected highest available container: $ContainerName (Free: $([math]::Round($BestContainer.FreePct,2))%)"
 
-            $AcliCmdAdd = "acli vm.disk_create $current_vmname container=$ContainerName create_size=${current_SizeGB}G"
-            Write-Host "Adding raw Nutanix virtual disk on VM: $current_vmname..."
-            $SshResult = Invoke-SSHCommand -SessionId $Session.SessionId -Command $AcliCmdAdd
-            
-            if ($SshResult.ExitStatus -ne 0) {
-                throw "Nutanix SSH command failed: $($SshResult.Output)"
-            }
-            Write-Host "Nutanix Disk creation complete."
+            $AcliCommand = "acli vm.disk_create '$current_vmname' container='$ContainerName' create_size='" + $current_SizeGB + "G'"
         }
         else {
-            $AcliCmdResize = "acli vm.disk_update $current_vmname disk_addr=$current_DiskAddr new_size=${current_SizeGB}G"
-            Write-Host "Extending virtual disk size to ${current_SizeGB} GB at index $current_DiskAddr..."
-            $SshResult = Invoke-SSHCommand -SessionId $Session.SessionId -Command $AcliCmdResize
+            $AcliCommand = "acli vm.disk_update '$current_vmname' disk_addr='$current_DiskAddr' new_size='" + $current_SizeGB + "G'"
+        }
 
-            if ($SshResult.ExitStatus -ne 0) {
-                throw "Nutanix SSH command failed: $($SshResult.Output)"
-            }
-            Write-Host "Nutanix Disk size extended successfully."
+        $Result = Invoke-SSHCommand -SessionId $Session.SessionId -Command $AcliCommand
+        Write-Host "Nutanix ACLI Output: $($Result.Output)"
+
+        # Error handling for raw ACLI failures
+        if ($Result.Output -like "*Error:*") {
+            throw "Nutanix ACLI operation failed: $($Result.Output)"
         }
 
         # ==========================================
-        # 2. WINDOWS GUEST OS FILE SYSTEM EXPANSION
+        # 2. WINDOWS GUEST AUTOMATION (OS LAYER)
         # ==========================================
-        Write-Host "Waiting 20 seconds for hotplug / resize event propagation on target OS..."
+        $GuestSecurePassword = ConvertTo-SecureString $env:LOCAL_PASSWORD -AsPlainText -Force
+        $GuestCredential = New-Object System.Management.Automation.PSCredential($env:LOCAL_USERNAME,$GuestSecurePassword)
+
+        Write-Host "Waiting 20 seconds for Nutanix disk hotplug/resize action to commit on Guest OS..."
         Start-Sleep -Seconds 20
 
-        $GuestSecurePass = ConvertTo-SecureString $env:LOCAL_PASSWORD -AsPlainText -Force
-        $GuestCred = New-Object PSCredential ($env:LOCAL_USERNAME,$GuestSecurePass)
-
-        Write-Host "Executing Partition Configuration on Windows Remote Guest OS..."
-        Invoke-Command -ComputerName $current_GuestIP -Credential $GuestCred -ScriptBlock {
+        Invoke-Command -ComputerName $current_GuestIP -Credential $GuestCredential -ScriptBlock {
             param($Action, $DriveLetter)
 
-            # Ensure storage layer re-discovers disk boundaries
+            # Force dynamic disk and storage layer re-discovery
+            try {
+                Update-StorageProviderCache -DiscoveryLevel Full -ErrorAction SilentlyContinue
+            } catch {}
+            
             "rescan" | diskpart | Out-Null
+            Start-Sleep -Seconds 5
 
             if ($Action -eq "add") {
-                # Look for Offline or un-initialized disk
-                $RawDisks = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -or $_.OperationalStatus -eq "Offline" }
-                if ($RawDisks.Count -eq 0) {
-                    throw "No new RAW or Offline disk discovered on Guest OS. Rescan failed."
+                $Disk = $null
+                $maxAttempts = 6
+                for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+                    Write-Host "Scanning for newly hot-plugged RAW or Offline disk (Attempt $attempt of $maxAttempts)..."
+                    
+                    try {
+                        Update-StorageProviderCache -DiscoveryLevel Full -ErrorAction SilentlyContinue
+                    } catch {}
+                    
+                    "rescan" | diskpart | Out-Null
+                    Start-Sleep -Seconds 5
+                    
+                    $Disk = Get-Disk | Where-Object {
+                        $_.PartitionStyle -eq "RAW" -or $_.OperationalStatus -eq "Offline" -or $_.PartitionStyle -eq "None" -or $_.PartitionStyle -eq "Unknown"
+                    } | Sort-Object Number | Select-Object -First 1
+                    
+                    if ($Disk) {
+                        Write-Host "Found target disk: Number $($Disk.Number), Size $($Disk.Size), OperationalStatus $($Disk.OperationalStatus), PartitionStyle $($Disk.PartitionStyle)"
+                        break
+                    }
                 }
 
-                $TargetDisk = $RawDisks[0]
-                Write-Host "RAW Disk Discovered - Index: $($TargetDisk.Number), Size: $([math]::Round($TargetDisk.Size / 1GB, 2)) GB"
-
-                if ($TargetDisk.OperationalStatus -eq "Offline") {
-                    Set-Disk -Number $TargetDisk.Number -IsOffline $false
+                if (-not $Disk) { 
+                    Write-Host "All current disks on the Guest OS:"
+                    Get-Disk | ForEach-Object {
+                        Write-Host "Disk #$($_.Number): Size=$($_.Size), OpStatus=$($_.OperationalStatus), Style=$($_.PartitionStyle)"
+                    }
+                    throw "No RAW or Offline disk found. Please ensure the new virtual drive is recognized." 
                 }
 
-                Initialize-Disk -Number $TargetDisk.Number -PartitionStyle GPT -ErrorAction Stop
-                $NewPartition = New-Partition -DiskNumber $TargetDisk.Number -UseMaximumSize -DriveLetter $DriveLetter -ErrorAction Stop
+                if ($Disk.OperationalStatus -eq "Offline") {
+                    Set-Disk -Number $Disk.Number -IsOffline $false -IsReadOnly $false -ErrorAction SilentlyContinue
+                }
+
+                Initialize-Disk -Number $Disk.Number -PartitionStyle GPT
+                $Partition = New-Partition -DiskNumber $Disk.Number -DriveLetter $DriveLetter -UseMaximumSize
+                Format-Volume -Partition $Partition -FileSystem NTFS -Confirm:$false -Force
                 
-                # Format NTFS Label
-                Format-Volume -Partition $NewPartition -FileSystem NTFS -NewFileSystemLabel "New volume" -Confirm:$false -ErrorAction Stop
-                Write-Host "Successfully initialized Disk $($TargetDisk.Number) and formatted to Drive $DriveLetter:"
+                Write-Host "Successfully initialized RAW Disk $($Disk.Number) and mapped to Drive ${DriveLetter}:"
             }
             else {
-                # Extend existing SCSI disk partition
-                $Partition = Get-Partition -DriveLetter $DriveLetter -ErrorAction SilentlyContinue
+                $Partition = Get-Partition -DriveLetter $DriveLetter
                 if (-not $Partition) {
-                    throw "Target Drive $DriveLetter: could not be located on Remote Guest OS"
+                    throw "Drive letter ${DriveLetter}: was not found on the guest OS. Cannot extend."
                 }
 
-                # Rescan disk layer specifically
-                Update-Disk -Number $Partition.DiskNumber
+                # CRITICAL OS FIX: Force Windows to clear size caching and read new limits
+                Update-Disk -Number $Partition.DiskNumber -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 3
 
-                $SupportedSize = Get-PartitionSupportedSize -DiskNumber $Partition.DiskNumber -PartitionNumber $Partition.PartitionNumber
-                Write-Host "Available expansion limits: Max=$([math]::Round($SupportedSize.SizeMax / 1GB, 2)) GB"
+                # Query the expanded physical disk bounds
+                $SupportedSize = Get-PartitionSupportedSize `
+                    -DiskNumber $Partition.DiskNumber `
+                    -PartitionNumber $Partition.PartitionNumber
 
                 # Extend partition to maximum size
                 Resize-Partition `
@@ -194,7 +209,7 @@ function Invoke-DiskProvisioning {
                     -PartitionNumber $Partition.PartitionNumber `
                     -Size $SupportedSize.SizeMax
 
-                Write-Host "Successfully expanded Drive " + $DriveLetter + ": to maximum size of $([math]::Round($SupportedSize.SizeMax / 1GB, 2)) GB"
+                Write-Host "Successfully expanded Drive ${DriveLetter}: to maximum size of $([math]::Round($SupportedSize.SizeMax / 1GB, 2)) GB"
             }
 
         } -ArgumentList $current_disk_action, $current_DriveLetter
@@ -308,6 +323,25 @@ Write-Host "                DISK PROVISIONING SUMMARY REPORT              "
 Write-Host "=============================================================="
 $ExecutionResults | Format-Table -AutoSize
 Write-Host "=============================================================="
+
+# --- Generate GitHub Actions Step Summary ---
+if ($env:GITHUB_STEP_SUMMARY) {
+    $md = @()
+    $md += "### Nutanix Disk Provisioning Summary"
+    $md += ""
+    $md += "| Site Name | VMName | Action | Size | Status |"
+    $md += "| :--- | :--- | :--- | :---: | :--- |"
+    foreach ($res in $ExecutionResults) {
+        $site = $res."Site Name"
+        $vm = $res."VMName"
+        $act = $res."Action"
+        $sz = $res."Size"
+        $stat = $res."Status"
+        $statusFormatted = if ($stat -eq "successful") { "🟢 Successful" } else { "🔴 Failed" }
+        $md += "| $site | $vm | $act | $sz GB | $statusFormatted |"
+    }
+    $md | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+}
 
 if ($AnyFailed) {
     throw "One or more VM disk provisioning tasks failed."
