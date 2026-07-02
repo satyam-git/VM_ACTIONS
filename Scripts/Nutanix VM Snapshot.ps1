@@ -1,16 +1,13 @@
 param($JsonInputs)
 $data = $JsonInputs | ConvertFrom-Json
 
-# Helper: Load Nutanix Cmdlets
 function Initialize-Nutanix {
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
         Add-PSSnapin NutanixCmdletsPSSnapin
     }
 }
 
-# Site mapping
 $siteMap = @{ "Bangalore" = "192.168.136.50"; "Pune" = "x.x.x.x"; "Chennai" = "x.x.x.x" }
-
 $site = $data.s1
 $vmName = $data.v1
 $op = $data.op # 1=Create, 2=Delete, 3=Restore
@@ -38,17 +35,34 @@ try {
             Remove-NTNXSnapshot -Uuid $snap.uuid -ErrorAction Stop | Out-Null
             Write-Host "SUCCESS: Deleted snapshot '$snapName'"
         }
-        "3" { # RESTORE (The Cmdlet Method)
+        "3" { # RESTORE (Graceful Shutdown Logic)
             $snap = Get-NTNXSnapshot | Where-Object { $_.vmUuid -eq $vm.uuid -and $_.snapshotName -eq $snapName }
             if (-not $snap) { throw "Snapshot '$snapName' not found." }
 
-            # Shutdown
             if ($vm.powerState -eq "on") {
-                Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction SilentlyContinue | Out-Null
-                Start-Sleep -Seconds 45
+                Write-Host "Initiating graceful shutdown..."
+                Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction Stop | Out-Null
+                
+                # Graceful wait loop (Check status for up to 3 minutes)
+                $timeout = 180
+                $elapsed = 0
+                while ($elapsed -lt $timeout) {
+                    Start-Sleep -Seconds 10
+                    $elapsed += 10
+                    $currentVm = Get-NTNXVM -Vmid $vm.uuid
+                    if ($currentVm.powerState -eq "off") {
+                        Write-Host "VM shut down gracefully."
+                        break
+                    }
+                    Write-Host "Waiting for shutdown... ($elapsed seconds elapsed)"
+                }
+                
+                if ($currentVm.powerState -eq "on") {
+                    throw "VM failed to shut down gracefully within $timeout seconds. Manual intervention required."
+                }
             }
             
-            # Use the cmdlet that you verified works in your manual environment
+            # Perform Restore
             Restore-NTNXVirtualMachine -Vmid $vm.uuid -SnapshotUuid $snap.uuid -ErrorAction Stop | Out-Null
             
             Set-NTNXVMPowerOn -Vmid $vm.uuid -ErrorAction Stop | Out-Null
