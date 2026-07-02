@@ -11,7 +11,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$SizeGB,
 
-    [Parameter(Mandatory = $false)]
+    [Parameter(Mandatory = $true)]
     [string]$DiskAddr = "none",
 
     [Parameter(Mandatory = $true)]
@@ -26,8 +26,6 @@ $ErrorActionPreference = "Stop"
 Write-Host "====================================="
 Write-Host "Nutanix Disk Provisioning Started"
 Write-Host "====================================="
-
-Import-Module Posh-SSH -ErrorAction Stop
 
 # --- Environmental & Parameter Sanity Checks ---
 if ([string]::IsNullOrWhiteSpace($env:PE_USERNAME)) { throw "PE_USERNAME secret not found" }
@@ -76,90 +74,145 @@ function Invoke-DiskProvisioning {
         Write-Warning "Failed to set TrustedHosts in script. Ensure runner shell is elevated, or configure it in the YAML step."
     }
 
-    $SecurePassword = ConvertTo-SecureString $env:PE_PASSWORD -AsPlainText -Force
-    $Credential = New-Object PSCredential ($env:PE_USERNAME,$SecurePassword)
+    # --- Enable TLS 1.2 and bypass self-signed certificate validation ---
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    [Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
 
-    $Session = New-SSHSession -ComputerName $current_pe_ip -Credential $Credential -AcceptKey -Force
+    $pair = "$($env:PE_USERNAME):$($env:PE_PASSWORD)"
+    $encodedCredentials = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes($pair))
+    $headers = @{
+        Authorization = "Basic $encodedCredentials"
+        "Content-Type" = "application/json"
+    }
 
     try {
         # ==========================================
-        # 1. NUTANIX CLUSTER DISK CONFIGURATION
+        # 1. NUTANIX CLUSTER DISK CONFIGURATION via REST API
         # ==========================================
+        # Find VM UUID
+        Write-Host "Connecting to Prism Element REST API at https://$current_pe_ip:9440..."
+        $vmUrl = "https://$current_pe_ip:9440/api/nutanix/v2.0/vms?filter=vm_name==$current_vmname"
+        $vmResult = Invoke-RestMethod -Uri $vmUrl -Method Get -Headers $headers
+        if (-not $vmResult -or -not $vmResult.entities -or $vmResult.entities.Count -eq 0) {
+            throw "VM Not Found: VM '$current_vmname' was not found on the Nutanix cluster."
+        }
+        $vmObj = $vmResult.entities[0]
+        $vmUuid = $vmObj.uuid
+
+        $task = $null
+
         if ($current_disk_action -eq "add") {
-            if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
-                Add-PSSnapin NutanixCmdletsPSSnapin
-            }
+            # Find Best Storage Container
+            $containerUrl = "https://$current_pe_ip:9440/api/nutanix/v2.0/containers"
+            $containerResult = Invoke-RestMethod -Uri $containerUrl -Method Get -Headers $headers
+            
+            $clusterUrl = "https://$current_pe_ip:9440/api/nutanix/v2.0/cluster"
+            $clusterDetails = Invoke-RestMethod -Uri $clusterUrl -Method Get -Headers $headers
+            $Prefix = $clusterDetails.name.Substring(0,[math]::Min(3,$clusterDetails.name.Length))
 
-            Connect-NTNXCluster -Server $current_pe_ip -UserName $env:PE_USERNAME -Password $SecurePassword -AcceptInvalidSSLCerts | Out-Null
-
-            $ClusterDetails = Get-NTNXCluster
-            $Prefix = $ClusterDetails.name.Substring(0,[math]::Min(3,$ClusterDetails.name.Length))
-
-            $BestContainer = Get-NTNXContainer |
+            $BestContainer = $containerResult.entities |
             Where-Object {
-                $n = if ($_.name) { $_.name } else { $_.containerName }
+                $n = $_.name
                 $n -like ("$Prefix" + "*") -and $n -notmatch "NutanixManagementShare|NutaniXFitInstance|default-container"
             } |
             Select-Object *,@{
                 Name="FreePct"
                 Expression={
-                    $Cap=[double]$_.usageStats.'storage.capacity_bytes'
-                    $Use=[double]$_.usageStats.'storage.usage_bytes'
+                    $Cap=[double]$_.usage_stats.'storage.capacity_bytes'
+                    $Use=[double]$_.usage_stats.'storage.usage_bytes'
                     if($Cap -gt 0){ (($Cap-$Use)/$Cap)*100 } else {0}
                 }
             } |
             Sort-Object FreePct -Descending |
             Select-Object -First 1
 
-            $ContainerName = if ($BestContainer.name) { $BestContainer.name } else { $BestContainer.containerName }
+            $ContainerName = $BestContainer.name
+            Write-Host "Selected Storage Container: $ContainerName (Free: $([math]::Round($BestContainer.FreePct, 2))%)"
 
-            $AcliCommand = "acli vm.disk_create '$current_vmname' container='$ContainerName' create_size='" + $current_SizeGB + "G'"
+            $diskSizeBytes = [double]$current_SizeGB * 1024 * 1024 * 1024
+            $body = @{
+                vm_disk_create = @{
+                    container_name = $ContainerName
+                    size_bytes = $diskSizeBytes
+                }
+            } | ConvertTo-Json -Depth 5
+
+            $attachUrl = "https://$current_pe_ip:9440/api/nutanix/v2.0/vms/$vmUuid/disks/attach"
+            Write-Host "Dispatching disk attach POST request..."
+            $task = Invoke-RestMethod -Uri $attachUrl -Method Post -Headers $headers -Body $body
         }
         else {
-            $AcliCommand = "acli vm.disk_update '$current_vmname' disk_addr='$current_DiskAddr' new_size='" + $current_SizeGB + "G'"
+            $diskSizeBytes = [double]$current_SizeGB * 1024 * 1024 * 1024
+            
+            # Parse DiskAddr, e.g., "scsi.1" -> bus: "scsi", index: 1
+            $addrParts = $current_DiskAddr.Split('.')
+            $deviceBus = $addrParts[0].ToLower()
+            $deviceIndex = [int]$addrParts[1]
+
+            $body = @{
+                disk_list = @(
+                    @{
+                        disk_address = @{
+                            device_bus = $deviceBus
+                            device_index = $deviceIndex
+                        }
+                        vm_disk_update = @{
+                            disk_size_bytes = $diskSizeBytes
+                        }
+                    }
+                )
+            } | ConvertTo-Json -Depth 5
+
+            $updateUrl = "https://$current_pe_ip:9440/api/nutanix/v2.0/vms/$vmUuid"
+            Write-Host "Dispatching disk update/resize PUT request..."
+            $task = Invoke-RestMethod -Uri $updateUrl -Method Put -Headers $headers -Body $body
         }
 
-        $Result = Invoke-SSHCommand -SessionId $Session.SessionId -Command $AcliCommand
-        Write-Host "Nutanix ACLI Output: $($Result.Output)"
-
-        # Error handling for raw ACLI failures
-        if ($Result.Output -like "*Error:*" -or $Result.Output -like "*NotFound:*" -or $Result.Output -like "*not found*" -or $Result.Output -like "*Unknown name:*" -or $Result.Output -like "*does not exist*") {
-            if ($Result.Output -like "*Unknown name:*" -or $Result.Output -like "*does not exist*" -or $Result.Output -like "*not found*") {
-                throw "VM Not Found: VM '$current_vmname' was not found on the Nutanix cluster. Details: $($Result.Output)"
-            }
-            throw "Nutanix ACLI operation failed: $($Result.Output)"
+        if (-not $task -or -not $task.task_uuid) {
+            throw "Failed to trigger Nutanix disk action. No task was returned from Prism Element."
         }
+
+        $taskUuid = $task.task_uuid
+        Write-Host "Nutanix REST Task Created: $taskUuid. Polling for completion..."
+
+        $taskUrl = "https://$current_pe_ip:9440/api/nutanix/v2.0/tasks/$taskUuid"
+        $taskStatus = "Queued"
+        $timeout = 120
+        $elapsed = 0
+        while ($taskStatus -ne "Succeeded" -and $taskStatus -ne "Failed" -and $elapsed -lt $timeout) {
+            Start-Sleep -Seconds 2
+            $elapsed += 2
+            $taskResult = Invoke-RestMethod -Uri $taskUrl -Method Get -Headers $headers
+            $taskStatus = $taskResult.progress_status
+            Write-Host "Polling task $taskUuid... status: $taskStatus"
+        }
+
+        if ($taskStatus -ne "Succeeded") {
+            throw "Nutanix REST disk action task failed or timed out. Status: $taskStatus"
+        }
+        Write-Host "Nutanix cluster-side disk operation complete: Succeeded."
 
         # ==========================================
         # 2. WINDOWS GUEST AUTOMATION (OS LAYER)
         # ==========================================
-        $GuestSecurePassword = ConvertTo-SecureString $env:LOCAL_PASSWORD -AsPlainText -Force
-        $GuestCredential = New-Object System.Management.Automation.PSCredential($env:LOCAL_USERNAME,$GuestSecurePassword)
-
         Write-Host "Waiting 20 seconds for Nutanix disk hotplug/resize action to commit on Guest OS..."
         Start-Sleep -Seconds 20
 
-        Invoke-Command -ComputerName $current_GuestIP -Credential $GuestCredential -ScriptBlock {
-            param($Action, $DriveLetter)
+        Write-Host "Establishing remote WinRM session to Guest OS at $current_GuestIP..."
+        $SecureLocalPass = ConvertTo-SecureString $env:LOCAL_PASSWORD -AsPlainText -Force
+        $GuestCred = New-Object PSCredential ($env:LOCAL_USERNAME,$SecureLocalPass)
 
-            # Force dynamic disk and storage layer re-discovery
-            try {
-                Update-StorageProviderCache -DiscoveryLevel Full -ErrorAction SilentlyContinue
-            } catch {}
-            
-            "rescan" | diskpart | Out-Null
-            Start-Sleep -Seconds 5
+        Invoke-Command -ComputerName $current_GuestIP -Credential $GuestCred -ErrorAction Stop -ScriptBlock {
+            param($disk_action_param, $DriveLetter)
 
-            if ($Action -eq "add") {
+            Write-Host "[GuestOS] Successfully authenticated remote session. Running OS disk alignment tasks..."
+
+            if ($disk_action_param -eq "add") {
                 $Disk = $null
-                $maxAttempts = 6
-                for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-                    Write-Host "Scanning for newly hot-plugged RAW or Offline disk (Attempt $attempt of $maxAttempts)..."
-                    
-                    try {
-                        Update-StorageProviderCache -DiscoveryLevel Full -ErrorAction SilentlyContinue
-                    } catch {}
-                    
+                # Retries to discover hotplugged disks (supporting RAW, None, Unknown, or Offline)
+                for ($attempt = 1; $attempt -le 6; $attempt++) {
+                    Write-Host "[GuestOS] Scanning for newly hot-plugged raw or offline disk (Attempt $attempt of 6)..."
+                    try { Update-StorageProviderCache -DiscoveryLevel Full -ErrorAction SilentlyContinue } catch {}
                     "rescan" | diskpart | Out-Null
                     Start-Sleep -Seconds 5
                     
@@ -182,14 +235,16 @@ function Invoke-DiskProvisioning {
                 }
 
                 if ($Disk.OperationalStatus -eq "Offline") {
-                    Set-Disk -Number $Disk.Number -IsOffline $false -IsReadOnly $false -ErrorAction SilentlyContinue
+                    # Bring the disk online first, then ensure read-write status in separate calls to avoid parameter set conflicts
+                    Set-Disk -Number $Disk.Number -IsOffline $false -ErrorAction SilentlyContinue
+                    Set-Disk -Number $Disk.Number -IsReadOnly $false -ErrorAction SilentlyContinue
                 }
 
                 Initialize-Disk -Number $Disk.Number -PartitionStyle GPT
                 $Partition = New-Partition -DiskNumber $Disk.Number -DriveLetter $DriveLetter -UseMaximumSize
                 Format-Volume -Partition $Partition -FileSystem NTFS -Confirm:$false -Force
                 
-                Write-Host "Successfully initialized RAW Disk $($Disk.Number) and mapped to Drive ${DriveLetter}:"
+                Write-Host "Successfully initialized RAW Disk \$($Disk.Number) and mapped to Drive ${DriveLetter}:"
             }
             else {
                 $Partition = Get-Partition -DriveLetter $DriveLetter
@@ -218,10 +273,10 @@ function Invoke-DiskProvisioning {
                         -PartitionNumber $Partition.PartitionNumber `
                         -Size $SupportedSize.SizeMax
 
-                    Write-Host "Successfully expanded Drive ${DriveLetter}: to maximum size of $([math]::Round($SupportedSize.SizeMax / 1GB, 2)) GB"
+                    Write-Host "Successfully expanded Drive ${DriveLetter}: to maximum size of \$([math]::Round($SupportedSize.SizeMax / 1GB, 2)) GB"
                 }
                 else {
-                    Write-Host "Drive ${DriveLetter}: is already at the maximum possible size of $([math]::Round($Partition.Size / 1GB, 2)) GB (difference is less than 1MB). Skipping resize."
+                    Write-Host "Drive ${DriveLetter}: is already at the maximum possible size of \$([math]::Round($Partition.Size / 1GB, 2)) GB (difference is less than 1MB). Skipping resize."
                 }
             }
 
@@ -229,27 +284,17 @@ function Invoke-DiskProvisioning {
 
     }
     finally {
-        if (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue) {
-            Disconnect-NTNXCluster -Servers $current_pe_ip -ErrorAction SilentlyContinue | Out-Null
-        }
-
-        if ($Session) {
-            Remove-SSHSession -SessionId $Session.SessionId | Out-Null
-        }
+        # Stateless REST API does not require session disconnection.
     }
 }
 
-# --- Parse Comma-Separated Multi-Valued Inputs ---
+# --- Helper Function: Converts comma-separated input strings into dynamic PowerShell arrays ---
 function Convert-ToArray {
-    param([string]$inputString)
-    if ([string]::IsNullOrWhiteSpace($inputString)) {
+    param([string]$inputStr)
+    if ([string]::IsNullOrWhiteSpace($inputStr)) {
         return @()
     }
-    $parts = $inputString.Split(',')
-    $trimmed = @()
-    foreach ($p in $parts) {
-        $trimmed += $p.Trim()
-    }
+    $trimmed = $inputStr.Split(',').ForEach({ $_.Trim() })
     return ,$trimmed
 }
 
@@ -350,6 +395,7 @@ for ($i = 0; $i -lt $Count; $i++) {
 Write-Host "`n=============================================================="
 Write-Host "                DISK PROVISIONING SUMMARY REPORT              "
 Write-Host "=============================================================="
+$ExecutionResults | Format-Table -AutoSize
 $ExecutionResults | Format-Table -AutoSize
 Write-Host "=============================================================="
 
