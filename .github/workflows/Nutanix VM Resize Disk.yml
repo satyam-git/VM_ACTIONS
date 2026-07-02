@@ -3,49 +3,34 @@ name: Nutanix VM Disk Resizing
 on:
   workflow_dispatch:
     inputs:
-      site_name:
-        description: "Site Name"
+      pe_ip:
+        description: "Prism Element / CVM IP (Support comma-separated list)"
         required: true
-        default: Banglore
-        type: choice
-        options:
-          - Banglore
-          - Chennai
-          - CPune
+        type: string
       vmname:
-        description: "VM Name"
+        description: "VM Name(s) (Support comma-separated list, e.g. test1,test2)"
         required: true
         type: string
       disk_action:
-        description: "Disk Action"
+        description: "Disk Action (Support comma-separated list, e.g. add,extend)"
         required: true
-        default: add
-        type: choice
-        options:
-          - add
-          - extend
+        default: "add"
+        type: string
       SizeGB:
-        description: "Disk Size in GB"
+        description: "Disk Size in GB (Support comma-separated list, e.g. 10,20)"
         required: true
         type: string
       DiskAddr:
-        description: "Disk Address (Required for extend)"
-        required: true
-        default: none
-        type: choice
-        options:
-          - none
-          - scsi.0
-          - scsi.1
-          - scsi.2
-          - scsi.3
-          - scsi.4
+        description: "Disk Address(es) (Support comma-separated list, e.g. none,scsi.1)"
+        required: false
+        default: "none"
+        type: string
       GuestIP:
-        description: "Windows Guest IP"
+        description: "Windows Guest IP(s) (Support comma-separated list, e.g. 192.168.1.10,192.168.1.11)"
         required: true
         type: string
       DriveLetter:
-        description: "Drive Letter"
+        description: "Drive Letter(s) (Support comma-separated list, e.g. K,L)"
         required: true
         type: string
 
@@ -68,7 +53,6 @@ jobs:
         shell: powershell
         run: |
           try {
-            # Bypass IP restriction by adding target guest IP address to the runner's TrustedHosts
             Set-Item WSMan:\localhost\Client\TrustedHosts -Value "*" -Force
             Write-Host "WinRM TrustedHosts configured to trust guest IPs successfully."
           } catch {
@@ -82,6 +66,12 @@ jobs:
           PE_PASSWORD: ${{ secrets.PE_PASSWORD }}
           LOCAL_USERNAME: ${{ secrets.LOCAL_USERNAME }}
           LOCAL_PASSWORD: ${{ secrets.LOCAL_PASSWORD }}
-          INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
-          & "$env:GITHUB_WORKSPACE\Scripts\Nutanix VM Resize Disk.ps1" -JsonInputs $env:INPUTS_JSON
+          & "$env:GITHUB_WORKSPACE\Scripts\Nutanix VM Resize Disk.ps1" `
+            -pe_ip "${{ inputs.pe_ip }}" `
+            -vmname "${{ inputs.vmname }}" `
+            -disk_action "${{ inputs.disk_action }}" `
+            -SizeGB "${{ inputs.SizeGB }}" `
+            -DiskAddr "${{ inputs.DiskAddr }}" `
+            -GuestIP "${{ inputs.GuestIP }}" `
+            -DriveLetter "${{ inputs.DriveLetter }}"
