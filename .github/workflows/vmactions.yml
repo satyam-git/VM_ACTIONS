@@ -1,85 +1,44 @@
-name: Nutanix VM Disk Resizing
+name: Nutanix VMActions
 
 on:
   workflow_dispatch:
     inputs:
-      site_name:
-        description: "Site Name"
-        required: true
-        default: "Banglore"
-        type: choice
-        options:
-          - Banglore
-          - Chennai
-          - CPune
-      vmname:
-        description: "VM Name(s) (Support comma-separated list, e.g. test1,test2)"
-        required: true
-        type: string
-      disk_action:
-        description: "Disk Action"
-        required: true
-        default: "add"
-        type: choice
-        options:
-          - add
-          - extend
-      SizeGB:
-        description: "Disk Size in GB (Support comma-separated list, e.g. 10,20)"
-        required: true
-        type: string
-      DiskAddr:
-        description: "Disk Address(es) (Support comma-separated list, e.g. none,scsi.1)"
-        required: false
-        default: "none"
-        type: string
-      GuestIP:
-        description: "Windows Guest IP(s) (Support comma-separated list, e.g. 192.168.1.10,192.168.1.11)"
-        required: true
-        type: string
-      DriveLetter:
-        description: "Drive Letter(s) (Support comma-separated list, e.g. K,L)"
-        required: true
-        type: string
+      s1: { description: '1: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
+      v1: { description: '1: VM Name', required: false, type: string }
+      a1: { description: '1: Action', required: false, type: choice, options: [start, stop, restart] }
+      d1: { description: '1: Delay (min)', required: false, default: '0', type: string }
+      s2: { description: '2: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
+      v2: { description: '2: VM Name', required: false, type: string }
+      a2: { description: '2: Action', required: false, type: choice, options: [start, stop, restart] }
+      d2: { description: '2: Delay (min)', required: false, default: '0', type: string }
+      s3: { description: '3: Site Name', required: false, type: choice, options: [None, Banglore, Chennai] }
+      v3: { description: '3: VM Name', required: false, type: string }
+      a3: { description: '3: Action', required: false, type: choice, options: [start, stop, restart] }
+      d3: { description: '3: Delay (min)', required: false, default: '0', type: string }
 
 jobs:
-  provision-disk:
+  run-batch:
     runs-on: self-hosted
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Posh-SSH
-        shell: powershell
-        run: |
-          Set-PSRepository PSGallery -InstallationPolicy Trusted
-          if (-not (Get-Module -ListAvailable -Name Posh-SSH)) {
-            Install-Module Posh-SSH -Scope CurrentUser -Force -AllowClobber
-          }
-
-      - name: Configure WinRM TrustedHosts
-        shell: powershell
-        run: |
-          try {
-            Set-Item WSMan:\localhost\Client\TrustedHosts -Value "*" -Force
-            Write-Host "WinRM TrustedHosts configured to trust guest IPs successfully."
-          } catch {
-            Write-Warning "Could not write TrustedHosts: $($_.Exception.Message). Script will fallback to dynamic local settings."
-          }
-
-      - name: Execute Disk Provisioning
+      - name: Run Parallel Nutanix Script
         shell: powershell
         env:
-          PE_USERNAME: ${{ secrets.PE_USERNAME }}
-          PE_PASSWORD: ${{ secrets.PE_PASSWORD }}
-          LOCAL_USERNAME: ${{ secrets.LOCAL_USERNAME }}
-          LOCAL_PASSWORD: ${{ secrets.LOCAL_PASSWORD }}
+          NUTANIX_USER: ${{ secrets.NUTANIX_USER }}
+          NUTANIX_PASS: ${{ secrets.NUTANIX_PASS }}
+          INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
-          & "$env:GITHUB_WORKSPACE\Scripts\Nutanix VM Resize Disk.ps1" `
-            -site_name "${{ inputs.site_name }}" `
-            -vmname "${{ inputs.vmname }}" `
-            -disk_action "${{ inputs.disk_action }}" `
-            -SizeGB "${{ inputs.SizeGB }}" `
-            -DiskAddr "${{ inputs.DiskAddr }}" `
-            -GuestIP "${{ inputs.GuestIP }}" `
-            -DriveLetter "${{ inputs.DriveLetter }}"
+          & "$env:GITHUB_WORKSPACE\Scripts\vmactions.ps1" -JsonInputs $env:INPUTS_JSON
+      
+      - name: Display Execution Summary
+        shell: powershell
+        run: |
+          if (Test-Path "data/vm_execution_log.csv") {
+            "### Execution Summary" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            "| Site Name | vmname | action | status |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            "| :--- | :--- | :--- | :--- |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            
+            Import-Csv "data/vm_execution_log.csv" -Header "Site", "VM", "Action", "Status" | ForEach-Object {
+              "| $($_.Site) | $($_.VM) | $($_.Action) | $($_.Status) |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            }
+          }
