@@ -1,11 +1,11 @@
-name: Nutanix VM Snapshot Automation
+name: Nutanix Snapshot Automation
 
 on:
   workflow_dispatch:
     inputs:
-      s1: { description: 'Site Name', required: true, type: choice, options: [Bangalore] }
+      s1: { description: 'Site Name', required: true, type: choice, options: [Bangalore, Pune, Chennai] }
       v1: { description: 'VM Name', required: true, type: string }
-      op: { description: 'Operation', required: true, type: choice, options: [1, 2, 3] } # 1:Create, 2:Delete, 3:Restore
+      op: { description: 'Operation (1:Create, 2:Delete, 3:Restore)', required: true, type: choice, options: [1, 2, 3] }
       sn1: { description: 'Snapshot Name', required: true, type: string }
 
 jobs:
