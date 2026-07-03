@@ -189,7 +189,7 @@ $workerBlock = {
 }
 
 $runspaces = @()
-$pool = [RunspaceFactory]::CreateRunspacePool(1, $vmNames.Count, $iss, $Host)
+$pool = [RunspaceFactory]::CreateRunspacePool($vmNames.Count, $vmNames.Count, $iss, $Host)
 $pool.Open()
 
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
@@ -213,15 +213,15 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
     $ps = [PowerShell]::Create()
     $ps.RunspacePool = $pool
     
-    # Execute the worker block directly using AddScript and AddArgument to bind parameters natively and thread-safely
+    # Execute the worker block directly using AddScript and AddParameter to natively and thread-safely bind named parameters
     [void]$ps.AddScript($workerBlock.ToString())
-    [void]$ps.AddArgument($siteMap[$siteName])
-    [void]$ps.AddArgument($env:PE_USER)
-    [void]$ps.AddArgument($env:PE_PASS)
-    [void]$ps.AddArgument($vmName)
-    [void]$ps.AddArgument($snapName)
-    [void]$ps.AddArgument($op)
-    [void]$ps.AddArgument($delay)
+    [void]$ps.AddParameter("siteIp", $siteMap[$siteName])
+    [void]$ps.AddParameter("user", $env:PE_USER)
+    [void]$ps.AddParameter("pass", $env:PE_PASS)
+    [void]$ps.AddParameter("vmName", $vmName)
+    [void]$ps.AddParameter("snapName", $snapName)
+    [void]$ps.AddParameter("op", $op)
+    [void]$ps.AddParameter("delay", $delay)
 
     $handle = $ps.BeginInvoke()
     
