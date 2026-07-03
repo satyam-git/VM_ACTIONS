@@ -83,19 +83,19 @@ try {
 $mutexName = "Global\NutanixSnapinLoadMutex"
 
 # -----------------------------------------------------------------
-# WORKER SCRIPT BLOCK
+# WORKER SCRIPT BLOCK – now uses $workflowStart and sleeps in ms
 # -----------------------------------------------------------------
-$workerBlock = {
-    param($siteIp, $user, $pass, $vmName, $snapName, $op, $launchTimeUtc, $delay)
+$workerScript = {
+    param($siteIp, $user, $pass, $vmName, $snapName, $op, $workflowStartUtc, $delaySec)
 
     function Write-Log($msg) {
         $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         Write-Output "[$timestamp] [VM: $vmName] $msg"
     }
 
-    Write-Log "Worker launched. Scheduled delay: $delay seconds from launch time."
+    Write-Log "Worker started. Scheduled delay: $delaySec seconds from workflow start."
 
-    # Ensure the snap-in is loaded (should already be present from ISS, but guard against edge cases)
+    # Ensure the snap-in is loaded (should already be present from ISS, but guard)
     if (-not (Get-Command Connect-NTNXCluster -ErrorAction SilentlyContinue)) {
         Write-Log "Snap-in not found, attempting to load with mutex..."
         $mutex = $null
@@ -160,16 +160,16 @@ $workerBlock = {
         }
     }
 
-    # 4. Wait until the scheduled time (launch time + delay)
+    # 4. Wait until the scheduled time (workflow start + delay)
     $now = [DateTime]::UtcNow
-    $elapsed = ($now - $launchTimeUtc).TotalSeconds
-    $remaining = $delay - $elapsed
-    if ($remaining -gt 0) {
-        Write-Log "Elapsed since launch: $([math]::Round($elapsed, 2)) sec. Waiting $([math]::Round($remaining, 2)) more seconds..."
-        Start-Sleep -Seconds $remaining
+    $elapsedMs = ($now - $workflowStartUtc).TotalMilliseconds
+    $remainingMs = ($delaySec * 1000) - $elapsedMs
+    if ($remainingMs -gt 0) {
+        Write-Log "Elapsed since workflow start: $([math]::Round($elapsedMs/1000, 2)) sec. Waiting $([math]::Round($remainingMs, 0)) ms..."
+        Start-Sleep -Milliseconds ([int]$remainingMs)
         Write-Log "Scheduled time reached. Proceeding with operation."
     } else {
-        Write-Warning "Scheduled time has already passed (elapsed $([math]::Round($elapsed, 2)) sec, delay $delay sec). Proceeding immediately."
+        Write-Warning "Scheduled time has already passed (elapsed $([math]::Round($elapsedMs/1000, 2)) sec, delay $delaySec sec). Proceeding immediately."
     }
 
     # 5. Perform the final operation
@@ -232,11 +232,13 @@ $workerBlock = {
 }
 
 # -----------------------------------------------------------------
-# Launch runspaces – capture launch time for each worker
+# Launch runspaces – all workers share the same workflow start time
 # -----------------------------------------------------------------
 $runspaces = @()
 $pool = [RunspaceFactory]::CreateRunspacePool(1, $vmNames.Count, $iss, $Host)
 $pool.Open()
+
+$workflowStart = [DateTime]::UtcNow  # Single timestamp for all workers
 
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
     $vmName = $vmNames[$i]
@@ -255,17 +257,15 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
             $delay = $delays[$delays.Count - 1]
         }
     }
-    Write-Output "VM '$vmName' scheduled delay: $delay seconds."
+    Write-Output "VM '$vmName' scheduled delay: $delay seconds from workflow start."
 
     $ps = [PowerShell]::Create()
     $ps.RunspacePool = $pool
 
-    [void]$ps.AddCommand("Invoke-Command")
-    [void]$ps.AddParameter("ScriptBlock", $workerBlock)
+    # Execute the script block directly – no Invoke-Command wrapper
+    [void]$ps.AddScript($workerScript.ToString())
 
-    # Capture launch time just before starting the worker
-    $launchTime = [DateTime]::UtcNow
-
+    # Pass arguments as an array to the script block
     $argsList = @(
         $siteMap[$siteName],
         $env:PE_USER,
@@ -273,10 +273,10 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
         $vmName,
         $snapName,
         $op,
-        $launchTime,
+        $workflowStart,
         $delay
     )
-    [void]$ps.AddParameter("ArgumentList", $argsList)
+    [void]$ps.AddArgument($argsList)
 
     $handle = $ps.BeginInvoke()
 
