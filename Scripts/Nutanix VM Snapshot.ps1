@@ -18,10 +18,10 @@ $delayInput = $data.d1
 $vmNames = $vmInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
 $snapNames = $snapInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
 
-# Split delays
+# Split delays and ensure it remains a strongly-typed array to prevent scalar unwrapping in Windows PowerShell
 $delays = @()
 if ($delayInput) {
-    $delays = $delayInput.Split(",") | ForEach-Object { [int]$_.Trim() }
+    $delays = @($delayInput.Split(",") | ForEach-Object { [int]$_.Trim() })
 }
 
 if ($vmNames.Count -eq 0) {
@@ -78,9 +78,10 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
             return
         }
 
-        if ($delay -gt 0) {
-            Write-Log "Delaying execution by $delay seconds..."
-            Start-Sleep -Seconds $delay
+        $delaySec = [int]$delay
+        if ($delaySec -gt 0) {
+            Write-Log "Delaying execution by $delaySec seconds..."
+            Start-Sleep -Seconds $delaySec
             Write-Log "Delay completed. Resuming operation."
         } else {
             Write-Log "Starting execution immediately."
@@ -126,13 +127,24 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
                         Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction Stop | Out-Null
                         
                         $isOff = $false
-                        for($j=0; $j -lt 30; $j++) {
-                            Start-Sleep -Seconds 10
+                        # Try up to 10 shutdown verification cycles (30s interval each)
+                        for($attempt = 1; $attempt -le 10; $attempt++) {
+                            Write-Log "Waiting 30 seconds to validate VM power status (Attempt $attempt/10)..."
+                            Start-Sleep -Seconds 30
+                            
                             $checkVm = Get-NTNXVM -Vmid $vm.uuid
-                            if ($checkVm.powerState -eq "OFF") { $isOff = $true; break }
-                            Write-Log "Waiting for graceful shutdown... ($(($j+1)*10)s)"
+                            if ($checkVm.powerState -eq "OFF") { 
+                                $isOff = $true
+                                Write-Log "VM shutdown validated. PowerState is OFF."
+                                break 
+                            }
+                            
+                            if ($attempt -lt 10) {
+                                Write-Log "VM is still ON. Re-triggering ACPI graceful shutdown..."
+                                Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction Stop | Out-Null
+                            }
                         }
-                        if (-not $isOff) { throw "VM failed to shut down gracefully within 5 minutes." }
+                        if (-not $isOff) { throw "VM failed to shut down after multiple ACPI graceful shutdown triggers." }
                     }
 
                     Write-Log "Waiting 60 seconds to allow the hypervisor to release disk locks..."
