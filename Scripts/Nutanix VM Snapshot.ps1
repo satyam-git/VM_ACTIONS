@@ -11,75 +11,80 @@ if (-not $rawJson -or $rawJson.Trim() -eq "") {
 
 Write-Output "Raw JSON input received: $rawJson"
 $data = $rawJson | ConvertFrom-Json
-Write-Output "Parsed s1 (Site): $($data.s1)"
-Write-Output "Parsed v1 (VMs): $($data.v1)"
-Write-Output "Parsed op (Op): $($data.op)"
-Write-Output "Parsed sn1 (Snaps): $($data.sn1)"
-Write-Output "Parsed d1 (Delays): $($data.d1)"
 
-function Initialize-Nutanix {
-    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
-        Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
-    }
+$siteMap = @{
+    "Bangalore" = "192.168.136.50"
+    "Pune"      = "10.0.0.20"
+    "Chennai"   = "10.0.0.10"
 }
 
-$siteMap = @{ "Bangalore" = "192.168.136.50"; "Pune" = "10.0.0.20"; "Chennai" = "10.0.0.10" }
 $siteName = [string]$data.s1
 $vmInput = [string]$data.v1
 $op = [string]$data.op # 1=Create, 2=Delete, 3=Restore
 $snapInput = [string]$data.sn1
 $delayInput = [string]$data.d1
 
-# Split comma-separated inputs
+if (-not $siteMap.ContainsKey($siteName)) {
+    throw "Site '$siteName' not found in mapping. Available: $($siteMap.Keys -join ', ')"
+}
+$siteIp = $siteMap[$siteName]
+
+# ---------- Parse VM list (Ensures collection is always an array) ----------
 $vmNames = @()
 if ($vmInput -and $vmInput.Trim() -ne "") {
     $vmNames = @($vmInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
 }
+if ($vmNames.Count -eq 0) {
+    throw "No VM names provided."
+}
+
+# ---------- Expand Snapshot Names ----------
 $snapNames = @()
 if ($snapInput -and $snapInput.Trim() -ne "") {
-    $snapNames = @($snapInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
-}
-
-# Split delays and ensure it remains a strongly-typed array to prevent scalar unwrapping in Windows PowerShell
-$delays = @()
-if ($delayInput -and $delayInput.Trim() -ne "") {
-    $parts = $delayInput.Split(",")
-    foreach ($part in $parts) {
-        $trimmed = $part.Trim()
-        if ($trimmed -ne "") {
-            if ($trimmed -match '^\d+$') {
-                $delays += [int]$trimmed
-            }
-        }
+    $tempSnaps = @($snapInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
+    for ($i = 0; $i -lt $vmNames.Count; $i++) {
+        if ($i -lt $tempSnaps.Count) { $snapNames += $tempSnaps[$i] }
+        else { $snapNames += $tempSnaps[-1] }
+    }
+} else {
+    for ($i = 0; $i -lt $vmNames.Count; $i++) {
+        $snapNames += "$($vmNames[$i])-snapshot"
     }
 }
-Write-Output "List of parsed delays: $($delays -join ', ')"
 
-if ($vmNames.Count -eq 0) {
-    Write-Error "No VM names provided."
-    exit 1
+# ---------- Expand Delays ----------
+$delays = @()
+if ($delayInput -and $delayInput.Trim() -ne "") {
+    $tempDelays = @($delayInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" } | ForEach-Object { [int]$_ })
+    for ($i = 0; $i -lt $vmNames.Count; $i++) {
+        if ($i -lt $tempDelays.Count) { $delays += $tempDelays[$i] }
+        else { $delays += $tempDelays[-1] }
+    }
+} else {
+    # Default to 20 seconds delay if empty
+    for ($i = 0; $i -lt $vmNames.Count; $i++) {
+        $delays += 20
+    }
 }
 
-# Pre-initialize Nutanix on the host thread to ensure assemblies/types are registered and cached
-try {
-    Initialize-Nutanix
-} catch {
-    Write-Warning "Failed to pre-load Nutanix snap-in on host thread: $($_.Exception.Message)"
+# ---------- Optional: cap delays ----------
+$MAX_DELAY_SECONDS = 3600
+for ($i = 0; $i -lt $delays.Count; $i++) {
+    if ($delays[$i] -gt $MAX_DELAY_SECONDS) {
+        Write-Warning "Delay of $($delays[$i]) seconds exceeds cap of $MAX_DELAY_SECONDS. Capping to $MAX_DELAY_SECONDS."
+        $delays[$i] = $MAX_DELAY_SECONDS
+    }
 }
 
-# Create a custom InitialSessionState and pre-register/import the Nutanix snap-in
-# so that all Runspaces created by the pool inherit the loaded snap-in by default in a thread-safe manner.
-$iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-$warning = $null
-try {
-    $iss.ImportPSSnapIn("NutanixCmdletsPSSnapin", [ref]$warning)
-} catch {
-    Write-Warning "Failed to pre-import Nutanix snap-in into InitialSessionState: $($_.Exception.Message)"
+# ---------- Print schedule ----------
+Write-Output "`n===== Schedule (parallel jobs) ====="
+for ($i = 0; $i -lt $vmNames.Count; $i++) {
+    Write-Output "$($vmNames[$i]) : Snapshot=$($snapNames[$i]), Delay=$($delays[$i]) sec"
 }
+Write-Output "Start time: $(Get-Date -Format 'HH:mm:ss')`n"
 
-# Define the worker script block which will run in parallel threads.
-# Using param() block lets Invoke-Command bind parameters perfectly and thread-safely.
-$workerBlock = {
+# ---------- Define the job script block ----------
+$snapshotJob = {
     param($siteIp, $user, $pass, $vmName, $snapName, $op, $delay)
     
     function Write-Log($msg) {
@@ -87,17 +92,16 @@ $workerBlock = {
         Write-Output "[$timestamp] [VM: $vmName] $msg"
     }
     
-    Write-Log "Background worker initialized. Site IP: $siteIp, Action Op: $op, Delay: $delay"
+    Write-Log "Background worker initialized. Site IP: $siteIp, Action Op: $op, Delay: $delay sec"
 
-    # Robust, thread-safe dynamic check to verify if the Nutanix snap-in cmdlets
-    # are actually loaded and visible in the current Runspace session.
-    try {
-        if (-not (Get-Command Connect-NTNXCluster -ErrorAction SilentlyContinue)) {
+    # Load Nutanix Cmdlets if they aren't already loaded in the job context
+    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
+        try {
             Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
+        } catch {
+            Write-Error "Failed to load Nutanix snap-in inside background job: $($_.Exception.Message)"
+            return
         }
-    } catch {
-        Write-Error "Failed to load Nutanix snap-in inside background worker thread: $($_.Exception.Message)"
-        return
     }
 
     $delaySec = [int]$delay
@@ -111,7 +115,10 @@ $workerBlock = {
 
     try {
         Write-Log "Connecting to Prism Element on $siteIp..."
-        $creds = ConvertTo-SecureString $pass -AsPlainText -Force
+        $creds = New-Object System.Security.SecureString
+        foreach ($char in $pass.ToCharArray()) { $creds.AppendChar($char) }
+        $creds.MakeReadOnly()
+
         Connect-NTNXCluster -Server $siteIp -UserName $user -Password $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
         Write-Log "Connected successfully."
 
@@ -188,87 +195,33 @@ $workerBlock = {
     }
 }
 
-$runspaces = @()
-$pool = [RunspaceFactory]::CreateRunspacePool($vmNames.Count, $vmNames.Count, $iss, $Host)
-$pool.Open()
-
+# ---------- Start a background job for each VM ----------
+$jobs = @()
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
+    $job = Start-Job -ScriptBlock $snapshotJob -ArgumentList `
+        $siteIp, `
+        $env:PE_USER, `
+        $env:PE_PASS, `
+        $vmNames[$i], `
+        $snapNames[$i], `
+        $op, `
+        $delays[$i]
+    $jobs += $job
+}
+
+# ---------- Wait for all jobs to complete ----------
+Write-Output "`nWaiting for all snapshot jobs to finish..."
+$jobs | Wait-Job | Out-Null
+
+# ---------- Receive output from each job ----------
+for ($i = 0; $i -lt $jobs.Count; $i++) {
+    $job = $jobs[$i]
     $vmName = $vmNames[$i]
-    $snapName = if ($i -lt $snapNames.Count) { $snapNames[$i] } else { "$vmName-snapshot" }
-    
-    $delay = 0
-    if ($delays.Count -eq 0) {
-        $delay = 20
-    } elseif ($delays.Count -eq 1) {
-        $delay = $delays[0]
-    } else {
-        if ($i -lt $delays.Count) {
-            $delay = $delays[$i]
-        } else {
-            $delay = $delays[$delays.Count - 1]
-        }
-    }
-    Write-Output "Allocated VM '$vmName' delay: $delay seconds."
-    
-    $ps = [PowerShell]::Create()
-    $ps.RunspacePool = $pool
-    
-    # Execute the worker block directly using AddScript and AddParameter to natively and thread-safely bind named parameters
-    [void]$ps.AddScript($workerBlock.ToString())
-    [void]$ps.AddParameter("siteIp", $siteMap[$siteName])
-    [void]$ps.AddParameter("user", $env:PE_USER)
-    [void]$ps.AddParameter("pass", $env:PE_PASS)
-    [void]$ps.AddParameter("vmName", $vmName)
-    [void]$ps.AddParameter("snapName", $snapName)
-    [void]$ps.AddParameter("op", $op)
-    [void]$ps.AddParameter("delay", $delay)
-
-    $handle = $ps.BeginInvoke()
-    
-    $runspaces += [PSCustomObject]@{
-        PowerShell = $ps
-        Handle     = $handle
-        VMName     = $vmName
-    }
-}
-
-Write-Output "Dispatched parallel thread-workers for $($vmNames.Count) VMs."
-Write-Output "Waiting for all parallel execution threads to complete..."
-
-while ($true) {
-    $active = $runspaces | Where-Object { -not $_.Handle.IsCompleted }
-    if ($active.Count -eq 0) { break }
-    Start-Sleep -Seconds 1
-}
-
-$hasErrors = $false
-
-# Retrieve and output results
-foreach ($r in $runspaces) {
     Write-Output "`n======================================================================"
-    Write-Output "LOG STREAM: VM '$($r.VMName)'"
+    Write-Output "LOG STREAM: VM '$vmName'"
     Write-Output "======================================================================"
-    
-    # Retrieve standard output
-    $output = $r.PowerShell.EndInvoke($r.Handle)
-    foreach ($line in $output) {
-        Write-Output $line
-    }
-
-    # Retrieve errors
-    if ($r.PowerShell.Streams.Error.Count -gt 0) {
-        $hasErrors = $true
-        foreach ($err in $r.PowerShell.Streams.Error) {
-            Write-Error "[VM: $($r.VMName)] $err"
-        }
-    }
-    
-    $r.PowerShell.Dispose()
+    Receive-Job $job
+    Remove-Job $job
 }
 
-$pool.Close()
-$pool.Dispose()
-
-if ($hasErrors) {
-    exit 1
-}
+Write-Output "`n===== All VMs processed. ====="
