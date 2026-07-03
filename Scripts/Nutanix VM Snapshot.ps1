@@ -1,5 +1,12 @@
 param($JsonInputs)
+Write-Output "--- NUTANIX AUTOMATION DEBUG LOGS ---"
+Write-Output "Raw JSON input received: $JsonInputs"
 $data = $JsonInputs | ConvertFrom-Json
+Write-Output "Parsed s1 (Site): $($data.s1)"
+Write-Output "Parsed v1 (VMs): $($data.v1)"
+Write-Output "Parsed op (Op): $($data.op)"
+Write-Output "Parsed sn1 (Snaps): $($data.sn1)"
+Write-Output "Parsed d1 (Delays): $($data.d1)"
 
 function Initialize-Nutanix {
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
@@ -24,14 +31,21 @@ if ($snapInput -and $snapInput.Trim() -ne "") {
     $snapNames = @($snapInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
 }
 
-# Split delays and ensure it remains a strongly-typed array to prevent scalar unwrapping in Windows PowerShell
-$delays = @()
+# Split delays using System.Collections.Generic.List[int] to guarantee thread safety and type safety
+$delays = [System.Collections.Generic.List[int]]::new()
 if ($delayInput -and $delayInput.Trim() -ne "") {
-    $delays = @($delayInput.Split(",") | ForEach-Object { 
-        $v = $_.Trim()
-        if ($v -ne "") { [int]$v }
-    } | Where-Object { $_ -ne $null })
+    $parts = $delayInput.Split(",")
+    foreach ($part in $parts) {
+        $trimmed = $part.Trim()
+        if ($trimmed -ne "") {
+            $parsedVal = 0
+            if ([int]::TryParse($trimmed, [ref]$parsedVal)) {
+                [void]$delays.Add($parsedVal)
+            }
+        }
+    }
 }
+Write-Output "List of parsed delays: $($delays -join ', ')"
 
 if ($vmNames.Count -eq 0) {
     Write-Error "No VM names provided."
@@ -62,6 +76,7 @@ $pool.Open()
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
     $vmName = $vmNames[$i]
     $snapName = if ($i -lt $snapNames.Count) { $snapNames[$i] } else { "$vmName-snapshot" }
+    
     $delay = 0
     if ($delays.Count -eq 0) {
         $delay = 20
@@ -74,6 +89,7 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
             $delay = $delays[$delays.Count - 1]
         }
     }
+    Write-Output "Allocated VM '$vmName' delay: $delay seconds."
     
     $ps = [PowerShell]::Create()
     $ps.RunspacePool = $pool
@@ -87,6 +103,8 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
             Write-Output "[$timestamp] [VM: $vmName] $msg"
         }
         
+        Write-Log "Background worker initialized. Site IP: $siteIp, Action Op: $op, Delay: $delay"
+
         # Robust, thread-safe dynamic check to verify if the Nutanix snap-in cmdlets
         # are actually loaded and visible in the current Runspace session.
         try {
