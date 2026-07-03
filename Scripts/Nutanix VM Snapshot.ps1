@@ -29,9 +29,25 @@ if ($vmNames.Count -eq 0) {
     exit 1
 }
 
-# Initialize Runspace Pools for lightweight, secure, and profile-free parallel execution.
+# Pre-initialize Nutanix on the host thread to ensure assemblies/types are registered and cached
+try {
+    Initialize-Nutanix
+} catch {
+    Write-Warning "Failed to pre-load Nutanix snap-in on host thread: $($_.Exception.Message)"
+}
+
+# Create a custom InitialSessionState and pre-register/import the Nutanix snap-in
+# so that all Runspaces created by the pool inherit the loaded snap-in by default in a thread-safe manner.
+$iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+$warning = $null
+try {
+    $iss.ImportPSSnapIn("NutanixCmdletsPSSnapin", [ref]$warning)
+} catch {
+    Write-Warning "Failed to pre-import Nutanix snap-in into InitialSessionState: $($_.Exception.Message)"
+}
+
 $runspaces = @()
-$pool = [RunspaceFactory]::CreateRunspacePool(1, $vmNames.Count)
+$pool = [RunspaceFactory]::CreateRunspacePool(1, $vmNames.Count, $iss, $Host)
 $pool.Open()
 
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
@@ -42,7 +58,7 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
     $ps = [PowerShell]::Create()
     $ps.RunspacePool = $pool
     
-    # We pass variables securely as arguments
+    # We pass variables as arguments
     [void]$ps.AddScript({
         param($siteIp, $user, $pass, $vmName, $snapName, $op, $delay)
         
@@ -51,12 +67,14 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
             Write-Output "[$timestamp] [VM: $vmName] $msg"
         }
         
+        # Robust, thread-safe dynamic check to verify if the Nutanix snap-in cmdlets
+        # are actually loaded and visible in the current Runspace session.
         try {
-            if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
+            if (-not (Get-Command Connect-NTNXCluster -ErrorAction SilentlyContinue)) {
                 Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
             }
         } catch {
-            Write-Error "Failed to load Nutanix snap-in: $($_.Exception.Message)"
+            Write-Error "Failed to load Nutanix snap-in inside background worker thread: $($_.Exception.Message)"
             return
         }
 
