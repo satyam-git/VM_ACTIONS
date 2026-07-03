@@ -111,6 +111,9 @@ $workerBlock = {
         Write-Log "Starting execution immediately."
     }
 
+    $workerStatus = "Successful"
+    $errorMessage = ""
+
     try {
         Write-Log "Connecting to Prism Element on $siteIp..."
         $creds = ConvertTo-SecureString $pass -AsPlainText -Force
@@ -184,9 +187,27 @@ $workerBlock = {
             }
         }
     } catch {
-        Write-Error "CRITICAL FAILURE: $($_.Exception.Message)"
+        $workerStatus = "failed"
+        $errorMessage = $_.Exception.Message
+        Write-Error "CRITICAL FAILURE: $errorMessage"
     } finally {
         Disconnect-NTNXCluster -Servers * -ErrorAction SilentlyContinue
+        
+        $actionName = switch ($op) {
+            "1" { "create" }
+            "2" { "delete" }
+            "3" { "restore" }
+            default { "unknown" }
+        }
+
+        # Output the structural results object as PSCustomObject with keys matching the requested exact column names
+        [PSCustomObject]@{
+            "VM Name"       = $vmName
+            "Snapshot Name" = $snapName
+            "Action"        = $actionName
+            "Status"        = $workerStatus
+            "Error"         = $errorMessage
+        }
     }
 }
 
@@ -250,6 +271,7 @@ while ($true) {
 }
 
 $hasErrors = $false
+$resultsList = @()
 
 # Retrieve and output results
 foreach ($r in $runspaces) {
@@ -257,10 +279,14 @@ foreach ($r in $runspaces) {
     Write-Output "LOG STREAM: VM '$($r.VMName)'"
     Write-Output "======================================================================"
     
-    # Retrieve standard output
+    # Retrieve standard output and check for the PSCustomObject result
     $output = $r.PowerShell.EndInvoke($r.Handle)
     foreach ($line in $output) {
-        Write-Output $line
+        if ($line -is [System.Management.Automation.PSCustomObject] -and $line.PSObject.Properties['VM Name'] -ne $null) {
+            $resultsList += $line
+        } else {
+            Write-Output $line
+        }
     }
 
     # Retrieve errors
@@ -277,6 +303,45 @@ foreach ($r in $runspaces) {
 $pool.Close()
 $pool.Dispose()
 
-if ($hasErrors) {
+# Create table matching screenshot exactly: VM Name | Snapshot Name | Action | Status
+Write-Output "`n===== EXECUTED RESULTS ====="
+$formatTable = $resultsList | Format-Table -Property "VM Name", "Snapshot Name", "Action", "Status" -AutoSize | Out-String
+Write-Output $formatTable
+
+# Write to GITHUB_STEP_SUMMARY as an elegant Markdown table matching the screenshot
+if ($env:GITHUB_STEP_SUMMARY) {
+    try {
+        $summary = @"
+### Nutanix VM Snapshot Report
+
+| VM Name | Snapshot Name | Action | Status |
+| :--- | :--- | :--- | :--- |
+"@
+        foreach ($res in $resultsList) {
+            # Normalize Status to exactly match capitalization/look from screenshot
+            # "Successful" (Capitalized), "failed" (Lowercase)
+            $statusStr = if ($res.Status -eq "Successful") { "Successful" } else { "failed" }
+            $summary += "`n| $($res.'VM Name') | $($res.'Snapshot Name') | $($res.Action) | $statusStr |"
+        }
+
+        # Check if there are any failed records to add details block
+        $failures = $resultsList | Where-Object { $_.Status -ne "Successful" }
+        if ($failures) {
+            $summary += "`n`n### Failure Details`n"
+            foreach ($fail in $failures) {
+                $summary += "- **$($fail.'VM Name')**: $($fail.Error)`n"
+            }
+        }
+        
+        $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+        Write-Output "`nSuccessfully appended report to GITHUB_STEP_SUMMARY."
+    } catch {
+        Write-Warning "Failed to write to GITHUB_STEP_SUMMARY: $($_.Exception.Message)"
+    }
+}
+
+# If we had any errors or any task failed, exit with 1
+$failedTasksCount = ($resultsList | Where-Object { $_.Status -ne "Successful" }).Count
+if ($hasErrors -or $failedTasksCount -gt 0) {
     exit 1
 }
