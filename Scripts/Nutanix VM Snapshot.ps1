@@ -78,17 +78,17 @@ try {
 }
 
 # -----------------------------------------------------------------
-# WORKER SCRIPT BLOCK – NO DELAY INSIDE; it runs immediately when started
+# WORKER SCRIPT BLOCK – connects immediately, then waits for scheduled time
 # -----------------------------------------------------------------
 $workerBlock = {
-    param($siteIp, $user, $pass, $vmName, $snapName, $op)
+    param($siteIp, $user, $pass, $vmName, $snapName, $op, $scheduledStartUtc)
     
     function Write-Log($msg) {
         $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         Write-Output "[$timestamp] [VM: $vmName] $msg"
     }
     
-    Write-Log "Background worker started."
+    Write-Log "Worker started. Scheduled operation time: $($scheduledStartUtc.ToString('HH:mm:ss')) UTC"
 
     # Ensure the snap‑in is loaded in this runspace
     try {
@@ -105,6 +105,17 @@ $workerBlock = {
         $creds = ConvertTo-SecureString $pass -AsPlainText -Force
         Connect-NTNXCluster -Server $siteIp -UserName $user -Password $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
         Write-Log "Connected successfully."
+
+        # Calculate remaining time until scheduled start
+        $now = [DateTime]::UtcNow
+        $remainingSeconds = ($scheduledStartUtc - $now).TotalSeconds
+        if ($remainingSeconds -gt 0) {
+            Write-Log "Waiting $([math]::Round($remainingSeconds, 2)) seconds until scheduled operation time..."
+            Start-Sleep -Seconds $remainingSeconds
+            Write-Log "Scheduled time reached. Proceeding with operation."
+        } else {
+            Write-Warning "Scheduled time has already passed (delay may have been too short). Proceeding immediately."
+        }
 
         Write-Log "Locating target VM..."
         $vm = Get-NTNXVM -SearchString $vmName | Where-Object { $_.vmName -eq $vmName } | Select-Object -First 1
@@ -177,13 +188,14 @@ $workerBlock = {
 }
 
 # -----------------------------------------------------------------
-# SCHEDULED LAUNCH LOGIC
+# LAUNCH ALL WORKERS IMMEDIATELY
 # -----------------------------------------------------------------
 $runspaces = @()
 $pool = [RunspaceFactory]::CreateRunspacePool(1, $vmNames.Count, $iss, $Host)
 $pool.Open()
 
-# Prepare all jobs – do NOT start them yet
+$nowUtc = [DateTime]::UtcNow
+
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
     $vmName = $vmNames[$i]
     $snapName = if ($i -lt $snapNames.Count) { $snapNames[$i] } else { "$vmName-snapshot" }
@@ -201,7 +213,10 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
             $delay = $delays[$delays.Count - 1]
         }
     }
-    Write-Output "VM '$vmName' scheduled to start after $delay seconds."
+
+    # Compute absolute scheduled start time (UTC)
+    $scheduledStart = $nowUtc.AddSeconds($delay)
+    Write-Output "VM '$vmName' scheduled to start at $($scheduledStart.ToString('HH:mm:ss')) UTC (delay $delay sec)"
 
     $ps = [PowerShell]::Create()
     $ps.RunspacePool = $pool
@@ -215,49 +230,33 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
         $env:PE_PASS,
         $vmName,
         $snapName,
-        $op
+        $op,
+        $scheduledStart
     )
     [void]$ps.AddParameter("ArgumentList", $argsList)
 
+    # Start the worker immediately
+    $handle = $ps.BeginInvoke()
+    
     $runspaces += [PSCustomObject]@{
         PowerShell = $ps
+        Handle     = $handle
         VMName     = $vmName
-        Delay      = $delay
-        Started    = $false
-        Handle     = $null   # will hold the IAsyncResult after BeginInvoke
     }
 }
 
-# Start the stopwatch and launch jobs at their scheduled times
-$stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
+Write-Output "Dispatched all workers. Waiting for completion..."
 
+# Wait for all to finish
 while ($true) {
-    # Launch any pending jobs whose delay has elapsed
-    $pending = $runspaces | Where-Object { -not $_.Started }
-    foreach ($job in $pending) {
-        if ($stopWatch.Elapsed.TotalSeconds -ge $job.Delay) {
-            Write-Output "Starting $($job.VMName) (delay $($job.Delay) sec)"
-            $job.Handle = $job.PowerShell.BeginInvoke()
-            $job.Started = $true
-        }
-    }
-
-    # Check for completed jobs
-    $running = $runspaces | Where-Object { $_.Started -and -not $_.Handle.IsCompleted }
-    $pendingCount = ($runspaces | Where-Object { -not $_.Started }).Count
-
-    if (($pendingCount -eq 0) -and ($running.Count -eq 0)) {
-        break
-    }
-
+    $active = $runspaces | Where-Object { -not $_.Handle.IsCompleted }
+    if ($active.Count -eq 0) { break }
     Start-Sleep -Milliseconds 300
 }
 
-$stopWatch.Stop()
+Write-Output "All workers completed."
 
-Write-Output "All threads have completed."
-
-# Retrieve results and errors
+# Collect results
 $hasErrors = $false
 foreach ($r in $runspaces) {
     Write-Output "`n======================================================================"
