@@ -56,7 +56,7 @@ try {
             
             # MANDATORY DELAY: Allow hypervisor to release disk locks
             Write-Output "Waiting 30 seconds before initiating restore..."
-            Start-Sleep -Seconds 30
+            Start-Sleep -Seconds 60
             
             Restore-NTNXVirtualMachine -Vmid $vm.uuid -SnapshotUuid $snap.uuid -ErrorAction Stop | Out-Null
             
