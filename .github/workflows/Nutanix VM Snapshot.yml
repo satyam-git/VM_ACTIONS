@@ -3,17 +3,41 @@ name: Nutanix VM Snapshot Automation
 on:
   workflow_dispatch:
     inputs:
-      s1: { description: 'Site Name', required: true, type: choice, options: [Bangalore, Pune, Chennai] }
-      v1: { description: 'VM Name', required: true, type: string }
-      op: { description: 'Operation (1:Create, 2:Delete, 3:Restore)', required: true, type: choice, options: [1, 2, 3] }
-      sn1: { description: 'Snapshot Name', required: true, type: string }
+      s1:
+        description: 'Site Name'
+        required: true
+        type: choice
+        options:
+          - Bangalore
+          - Pune
+          - Chennai
+      v1:
+        description: 'VM Name(s) (supports comma-separated list)'
+        required: true
+        type: string
+        default: 'test1,test2'
+      op:
+        description: 'Operation (1:Create, 2:Delete, 3:Restore)'
+        required: true
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+      sn1:
+        description: 'Snapshot Name(s) (supports comma-separated list, matched sequentially)'
+        required: true
+        type: string
+        default: 'test1-snapshot,test2.snapshot'
 
 jobs:
   run-snapshot-job:
     runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
-      - name: Run Snapshot Operation
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Run Multi-VM Snapshot Operation
         shell: powershell
         env:
           PE_USER: ${{ secrets.PE_Username }}
