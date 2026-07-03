@@ -1,6 +1,7 @@
 param($JsonInputs)
 $data = $JsonInputs | ConvertFrom-Json
 
+# Helper: Load Nutanix Cmdlets
 function Initialize-Nutanix {
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
         Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
@@ -10,7 +11,7 @@ function Initialize-Nutanix {
 $siteMap = @{ "Bangalore" = "192.168.136.50"; "Pune" = "10.0.0.20"; "Chennai" = "10.0.0.10" }
 $siteName = $data.s1
 $vmName = $data.v1
-$op = $data.op # 1=Create, 2=Delete, 3=Restore
+$op = $data.op 
 $snapName = $data.sn1
 
 try {
@@ -43,23 +44,22 @@ try {
                 Write-Output "Initiating graceful shutdown..."
                 Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction Stop | Out-Null
                 
-                # Verification loop: Poll power status every 10s for up to 5 minutes
+                # Verification: Poll until hypervisor confirms 'OFF'
                 $isOff = $false
                 for($i=0; $i -lt 30; $i++) {
                     Start-Sleep -Seconds 10
                     $checkVm = Get-NTNXVM -Vmid $vm.uuid
                     if ($checkVm.powerState -eq "OFF") { $isOff = $true; break }
-                    Write-Output "Waiting for graceful shutdown... ($(($i+1)*10)s)"
+                    Write-Output "Waiting for shutdown... ($(($i+1)*10)s)"
                 }
                 if (-not $isOff) { throw "VM failed to shut down gracefully." }
             }
             
-            # MANDATORY DELAY: Allow hypervisor to release disk locks
-            Write-Output "Waiting 30 seconds before initiating restore..."
-            Start-Sleep -Seconds 60
+            # Mandatory 30s buffer to release disk locks
+            Write-Output "Waiting 30 seconds before restoring..."
+            Start-Sleep -Seconds 30
             
             Restore-NTNXVirtualMachine -Vmid $vm.uuid -SnapshotUuid $snap.uuid -ErrorAction Stop | Out-Null
-            
             Set-NTNXVMPowerOn -Vmid $vm.uuid -ErrorAction Stop | Out-Null
             Write-Output "SUCCESS: Restore completed"
         }
