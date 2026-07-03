@@ -3,10 +3,39 @@ name: Nutanix VM Snapshot Automation
 on:
   workflow_dispatch:
     inputs:
-      s1: { description: 'Site Name', required: true, type: choice, options: [Bangalore, Pune, Chennai] }
-      v1: { description: 'VM Name', required: true, type: string }
-      op: { description: 'Operation (1:Create, 2:Delete, 3:Restore)', required: true, type: choice, options: [1, 2, 3] }
-      sn1: { description: 'Snapshot Name', required: true, type: string }
+      s1:
+        description: 'Site Name'
+        required: true
+        type: choice
+        options:
+          - Bangalore
+          - Pune
+          - Chennai
+      v1:
+        description: 'VM Name'
+        required: true
+        type: string
+      op:
+        description: 'Operation (1:Create, 2:Delete, 3:Restore)'
+        required: true
+        type: choice
+        options:
+          - 1
+          - 2
+          - 3
+      sn1:
+        description: 'Snapshot Name'
+        required: true
+        type: string
+      consistency:
+        description: 'Consistency (1: Crash-Consistent, 2: App-Consistent VSS, 3: Offline Graceful)'
+        required: true
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - "3"
+        default: "3"
 
 jobs:
   run-snapshot-job:
@@ -20,4 +49,4 @@ jobs:
           PE_PASS: ${{ secrets.PE_Password }}
           INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
-          & "$env:GITHUB_WORKSPACE\Scripts\Nutanix_VM_Snapshot.ps1" -JsonInputs $env:INPUTS_JSON
+          & "$env:GITHUB_WORKSPACE\Scripts\Nutanix VM Snapshot.ps1" -JsonInputs $env:INPUTS_JSON
