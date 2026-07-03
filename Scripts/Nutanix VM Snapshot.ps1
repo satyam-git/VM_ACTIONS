@@ -12,7 +12,6 @@ $siteName = $data.s1
 $vmName = $data.v1
 $op = $data.op # 1=Create, 2=Delete, 3=Restore
 $snapName = $data.sn1
-$consistencyMode = $data.consistency # 1=Crash-Consistent, 2=App-Consistent VSS, 3=Offline Graceful
 
 try {
     Initialize-Nutanix
@@ -27,45 +26,8 @@ try {
             $spec = New-NTNXObject -Name SnapshotSpecDTO
             $spec.vmUuid = $vm.uuid
             $spec.snapshotName = $snapName
-            
-            $wasOn = $false
-            if ($vm.powerState -eq "ON") {
-                if ($consistencyMode -eq "2") {
-                    # Application-consistent using VSS (NGT Required)
-                    $spec.snapshotType = "VSS"
-                    Write-Output "Initiating application-consistent VSS snapshot (NGT required)..."
-                }
-                elseif ($consistencyMode -eq "3") {
-                    # Offline Graceful Snapshot (Ensures 100% clean disk state)
-                    $wasOn = $true
-                    Write-Output "VM is powered ON. To prevent unexpected shutdown events on restore, shutting down VM gracefully..."
-                    Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction Stop | Out-Null
-                    
-                    # Verification loop: Poll power status every 10s for up to 5 minutes
-                    $isOff = $false
-                    for($i=0; $i -lt 30; $i++) {
-                        Start-Sleep -Seconds 10
-                        $checkVm = Get-NTNXVM -Vmid $vm.uuid
-                        if ($checkVm.powerState -eq "OFF") { $isOff = $true; break }
-                        Write-Output "Waiting for VM to power off... ($(($i+1)*10)s)"
-                    }
-                    if (-not $isOff) { throw "VM failed to shut down gracefully." }
-                    Write-Output "VM successfully powered OFF. Allowing 10 seconds for locks to release..."
-                    Start-Sleep -Seconds 10
-                }
-                else {
-                    Write-Output "Initiating crash-consistent live snapshot (Note: Windows will register this as dirty on restore)..."
-                }
-            }
-
             New-NTNXSnapshot -SnapshotSpecs $spec -ErrorAction Stop | Out-Null
             Write-Output "SUCCESS: Created snapshot '$snapName'"
-
-            # If we powered it off for Offline Graceful mode, power it back on now
-            if ($wasOn -and $consistencyMode -eq "3") {
-                Write-Output "Powering VM back ON..."
-                Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ON -ErrorAction Stop | Out-Null
-            }
         }
         "2" { # DELETE
             $snap = Get-NTNXSnapshot | Where-Object { $_.vmUuid -eq $vm.uuid -and $_.snapshotName -eq $snapName }
@@ -77,9 +39,8 @@ try {
             $snap = Get-NTNXSnapshot | Where-Object { $_.vmUuid -eq $vm.uuid -and $_.snapshotName -eq $snapName }
             if (-not $snap) { throw "Snapshot '$snapName' not found." }
 
-            # If VM is currently ON, shut it down gracefully before restoring
             if ($vm.powerState -eq "ON") {
-                Write-Output "Initiating graceful shutdown of active VM before restore..."
+                Write-Output "Initiating graceful shutdown..."
                 Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction Stop | Out-Null
                 
                 # Verification loop: Poll power status every 10s for up to 5 minutes
@@ -94,15 +55,13 @@ try {
             }
             
             # MANDATORY DELAY: Allow hypervisor to release disk locks
-            Write-Output "Waiting 60 seconds before initiating restore to allow disk lock release..."
+            Write-Output "Waiting 30 seconds before initiating restore..."
             Start-Sleep -Seconds 60
             
-            Write-Output "Restoring virtual machine to snapshot '$snapName'..."
             Restore-NTNXVirtualMachine -Vmid $vm.uuid -SnapshotUuid $snap.uuid -ErrorAction Stop | Out-Null
             
-            Write-Output "Powering VM back ON..."
-            Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ON -ErrorAction Stop | Out-Null
-            Write-Output "SUCCESS: Restore completed successfully."
+            Set-NTNXVMPowerOn -Vmid $vm.uuid -ErrorAction Stop | Out-Null
+            Write-Output "SUCCESS: Restore completed"
         }
     }
 } catch {
