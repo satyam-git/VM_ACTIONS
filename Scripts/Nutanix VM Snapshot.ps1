@@ -1,7 +1,7 @@
 param($JsonInputs)
 Write-Output "--- NUTANIX AUTOMATION DEBUG LOGS ---"
 
-# Support both parameter passing and direct environment variable reading for maximum robustness
+# Support both parameter passing and direct environment variable reading
 $rawJson = $JsonInputs
 if (-not $rawJson -or $rawJson.Trim() -eq "") {
     if ($env:INPUTS_JSON -and $env:INPUTS_JSON.Trim() -ne "") {
@@ -40,7 +40,7 @@ if ($snapInput -and $snapInput.Trim() -ne "") {
     $snapNames = @($snapInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
 }
 
-# Split delays using System.Collections.Generic.List[int] to guarantee thread safety and type safety
+# Parse delays
 $delays = [System.Collections.Generic.List[int]]::new()
 if ($delayInput -and $delayInput.Trim() -ne "") {
     $parts = $delayInput.Split(",")
@@ -61,15 +61,14 @@ if ($vmNames.Count -eq 0) {
     exit 1
 }
 
-# Pre-initialize Nutanix on the host thread to ensure assemblies/types are registered and cached
+# Pre-initialize Nutanix on the host thread for assembly caching
 try {
     Initialize-Nutanix
 } catch {
     Write-Warning "Failed to pre-load Nutanix snap-in on host thread: $($_.Exception.Message)"
 }
 
-# Create a custom InitialSessionState and pre-register/import the Nutanix snap-in
-# so that all Runspaces created by the pool inherit the loaded snap-in by default in a thread-safe manner.
+# Create an InitialSessionState that pre‑imports the Nutanix snap‑in
 $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
 $warning = $null
 try {
@@ -78,36 +77,26 @@ try {
     Write-Warning "Failed to pre-import Nutanix snap-in into InitialSessionState: $($_.Exception.Message)"
 }
 
-# Define the worker script block which will run in parallel threads.
-# Using param() block lets Invoke-Command bind parameters perfectly and thread-safely.
+# -----------------------------------------------------------------
+# WORKER SCRIPT BLOCK – NO DELAY INSIDE; it runs immediately when started
+# -----------------------------------------------------------------
 $workerBlock = {
-    param($siteIp, $user, $pass, $vmName, $snapName, $op, $delay)
+    param($siteIp, $user, $pass, $vmName, $snapName, $op)
     
     function Write-Log($msg) {
         $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         Write-Output "[$timestamp] [VM: $vmName] $msg"
     }
     
-    Write-Log "Background worker initialized. Site IP: $siteIp, Action Op: $op, Delay: $delay"
+    Write-Log "Background worker started."
 
-    # --- DELAY FIRST ---
-    $delaySec = [int]$delay
-    if ($delaySec -gt 0) {
-        Write-Log "Delaying execution by $delaySec seconds..."
-        Start-Sleep -Seconds $delaySec
-        Write-Log "Delay completed. Resuming operation."
-    } else {
-        Write-Log "Starting execution immediately."
-    }
-
-    # Robust, thread-safe dynamic check to verify if the Nutanix snap-in cmdlets
-    # are actually loaded and visible in the current Runspace session.
+    # Ensure the snap‑in is loaded in this runspace
     try {
         if (-not (Get-Command Connect-NTNXCluster -ErrorAction SilentlyContinue)) {
             Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
         }
     } catch {
-        Write-Error "Failed to load Nutanix snap-in inside background worker thread: $($_.Exception.Message)"
+        Write-Error "Failed to load Nutanix snap-in: $($_.Exception.Message)"
         return
     }
 
@@ -147,40 +136,37 @@ $workerBlock = {
                 if (-not $snap) { throw "Snapshot '$snapName' not found." }
 
                 if ($vm.powerState -eq "ON") {
-                    Write-Log "VM is currently powered ON. Initiating ACPI graceful shutdown..."
+                    Write-Log "VM is powered ON. Initiating ACPI graceful shutdown..."
                     Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction Stop | Out-Null
                     
                     $isOff = $false
-                    # Try up to 10 shutdown verification cycles (30s interval each)
                     for($attempt = 1; $attempt -le 10; $attempt++) {
-                        Write-Log "Waiting 30 seconds to validate VM power status (Attempt $attempt/10)..."
+                        Write-Log "Waiting 30 seconds for shutdown (Attempt $attempt/10)..."
                         Start-Sleep -Seconds 30
-                        
                         $checkVm = Get-NTNXVM -Vmid $vm.uuid
                         if ($checkVm.powerState -eq "OFF") { 
                             $isOff = $true
-                            Write-Log "VM shutdown validated. PowerState is OFF."
+                            Write-Log "VM shutdown validated."
                             break 
                         }
-                        
                         if ($attempt -lt 10) {
-                            Write-Log "VM is still ON. Re-triggering ACPI graceful shutdown..."
+                            Write-Log "VM still ON, re‑triggering ACPI shutdown..."
                             Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction Stop | Out-Null
                         }
                     }
-                    if (-not $isOff) { throw "VM failed to shut down after multiple ACPI graceful shutdown triggers." }
+                    if (-not $isOff) { throw "VM failed to shut down after multiple attempts." }
                 }
 
-                Write-Log "Waiting 60 seconds to allow the hypervisor to release disk locks..."
+                Write-Log "Waiting 60 seconds for hypervisor to release locks..."
                 Start-Sleep -Seconds 60
 
-                Write-Log "Restoring VM state from snapshot '$snapName'..."
+                Write-Log "Restoring VM from snapshot '$snapName'..."
                 Restore-NTNXVirtualMachine -Vmid $vm.uuid -SnapshotUuid $snap.uuid -ErrorAction Stop | Out-Null
-                Write-Log "Reverted block-storage states cleanly."
+                Write-Log "Block storage reverted."
 
-                Write-Log "Powering VM back ON..."
+                Write-Log "Powering VM ON..."
                 Set-NTNXVMPowerOn -Vmid $vm.uuid -ErrorAction Stop | Out-Null
-                Write-Log "SUCCESS: Restore completed and powered ON successfully."
+                Write-Log "SUCCESS: Restore completed."
             }
         }
     } catch {
@@ -190,14 +176,19 @@ $workerBlock = {
     }
 }
 
+# -----------------------------------------------------------------
+# SCHEDULED LAUNCH LOGIC
+# -----------------------------------------------------------------
 $runspaces = @()
 $pool = [RunspaceFactory]::CreateRunspacePool(1, $vmNames.Count, $iss, $Host)
 $pool.Open()
 
+# Prepare all jobs – do NOT start them yet
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
     $vmName = $vmNames[$i]
     $snapName = if ($i -lt $snapNames.Count) { $snapNames[$i] } else { "$vmName-snapshot" }
     
+    # Determine delay for this VM
     $delay = 0
     if ($delays.Count -eq 0) {
         $delay = 20
@@ -210,59 +201,74 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
             $delay = $delays[$delays.Count - 1]
         }
     }
-    Write-Output "Allocated VM '$vmName' delay: $delay seconds."
-    
+    Write-Output "VM '$vmName' scheduled to start after $delay seconds."
+
     $ps = [PowerShell]::Create()
     $ps.RunspacePool = $pool
-    
-    # Use Invoke-Command with Explicit ArgumentList to bind parameters to the worker script block perfectly.
+
+    # Build command with the worker block
     [void]$ps.AddCommand("Invoke-Command")
     [void]$ps.AddParameter("ScriptBlock", $workerBlock)
-    
     $argsList = @(
         $siteMap[$siteName],
         $env:PE_USER,
         $env:PE_PASS,
         $vmName,
         $snapName,
-        $op,
-        $delay
+        $op
     )
     [void]$ps.AddParameter("ArgumentList", $argsList)
 
-    $handle = $ps.BeginInvoke()
-    
     $runspaces += [PSCustomObject]@{
         PowerShell = $ps
-        Handle     = $handle
         VMName     = $vmName
+        Delay      = $delay
+        Started    = $false
+        Handle     = $null   # will hold the IAsyncResult after BeginInvoke
     }
 }
 
-Write-Output "Dispatched parallel thread-workers for $($vmNames.Count) VMs."
-Write-Output "Waiting for all parallel execution threads to complete..."
+# Start the stopwatch and launch jobs at their scheduled times
+$stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 while ($true) {
-    $active = $runspaces | Where-Object { -not $_.Handle.IsCompleted }
-    if ($active.Count -eq 0) { break }
-    Start-Sleep -Seconds 1
+    # Launch any pending jobs whose delay has elapsed
+    $pending = $runspaces | Where-Object { -not $_.Started }
+    foreach ($job in $pending) {
+        if ($stopWatch.Elapsed.TotalSeconds -ge $job.Delay) {
+            Write-Output "Starting $($job.VMName) (delay $($job.Delay) sec)"
+            $job.Handle = $job.PowerShell.BeginInvoke()
+            $job.Started = $true
+        }
+    }
+
+    # Check for completed jobs
+    $running = $runspaces | Where-Object { $_.Started -and -not $_.Handle.IsCompleted }
+    $pendingCount = ($runspaces | Where-Object { -not $_.Started }).Count
+
+    if (($pendingCount -eq 0) -and ($running.Count -eq 0)) {
+        break
+    }
+
+    Start-Sleep -Milliseconds 300
 }
 
-$hasErrors = $false
+$stopWatch.Stop()
 
-# Retrieve and output results
+Write-Output "All threads have completed."
+
+# Retrieve results and errors
+$hasErrors = $false
 foreach ($r in $runspaces) {
     Write-Output "`n======================================================================"
     Write-Output "LOG STREAM: VM '$($r.VMName)'"
     Write-Output "======================================================================"
     
-    # Retrieve standard output
     $output = $r.PowerShell.EndInvoke($r.Handle)
     foreach ($line in $output) {
         Write-Output $line
     }
 
-    # Retrieve errors
     if ($r.PowerShell.Streams.Error.Count -gt 0) {
         $hasErrors = $true
         foreach ($err in $r.PowerShell.Streams.Error) {
