@@ -29,6 +29,11 @@ on:
         required: true
         type: string
         default: 'test1-snapshot,test2.snapshot'
+      d1:
+        description: 'Independent Delays in seconds (comma-separated list, matched sequentially)'
+        required: false
+        type: string
+        default: '0,0'
 
 jobs:
   run-snapshot-job:
