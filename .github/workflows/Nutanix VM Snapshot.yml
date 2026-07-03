@@ -30,10 +30,10 @@ on:
         type: string
         default: 'test1-snapshot,test2.snapshot'
       d1:
-        description: 'Independent Delays in seconds (comma-separated list, matched sequentially)'
+        description: 'Independent Delays in seconds (e.g. 20 for all, or 10,30 for sequential)'
         required: false
         type: string
-        default: '0,0'
+        default: '20'
 
 jobs:
   run-snapshot-job:
