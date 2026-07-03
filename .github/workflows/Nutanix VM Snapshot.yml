@@ -3,22 +3,50 @@ name: Nutanix VM Snapshot Automation
 on:
   workflow_dispatch:
     inputs:
-      s1: { description: 'Site Name', required: true, type: choice, options: [Bangalore, Pune, Chennai] }
-      v1: { description: 'VM Names (comma separated)', required: true, type: string }
-      op: { description: 'Operation (1:Create, 2:Delete, 3:Restore)', required: true, type: choice, options: ['1', '2', '3'] }
-      sn1: { description: 'Snapshot Names (comma separated)', required: true, type: string }
-      d1: { description: 'Delays (min, comma separated)', required: false, default: '0', type: string }
+      s1:
+        description: 'Site Name'
+        required: true
+        type: choice
+        options:
+          - Bangalore
+          - Pune
+          - Chennai
+      v1:
+        description: 'VM Name(s) (supports comma-separated list)'
+        required: true
+        type: string
+        default: 'test1,test2'
+      op:
+        description: 'Operation (1:Create, 2:Delete, 3:Restore)'
+        required: true
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+      sn1:
+        description: 'Snapshot Name(s) (supports comma-separated list, matched sequentially)'
+        required: true
+        type: string
+        default: 'test1-snapshot,test2.snapshot'
+      d1:
+        description: 'Independent Delays in seconds (e.g. 20 for all, or 10,30 for sequential)'
+        required: false
+        type: string
+        default: '20'
 
 jobs:
   run-snapshot-job:
     runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
-      - name: Run Snapshot Operation
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Run Multi-VM Snapshot Operation
         shell: powershell
         env:
           PE_USER: ${{ secrets.PE_Username }}
           PE_PASS: ${{ secrets.PE_Password }}
           INPUTS_JSON: ${{ toJson(github.event.inputs) }}
         run: |
-          & "$env:GITHUB_WORKSPACE\Scripts\Nutanix_VM_Snapshot.ps1" -JsonInputs $env:INPUTS_JSON
+          & "$env:GITHUB_WORKSPACE\Scripts\Nutanix VM Snapshot.ps1" -JsonInputs $env:INPUTS_JSON
