@@ -8,6 +8,7 @@ on:
         required: true
         type: choice
         options:
+          - None
           - Bangalore
           - Pune
           - Chennai
@@ -15,7 +16,7 @@ on:
         description: 'VM Name(s) (supports comma-separated list)'
         required: true
         type: string
-        default: 'test1,test2'
+        default: 'none'
       op:
         description: 'Operation (1:Create, 2:Delete, 3:Restore)'
         required: true
@@ -28,12 +29,12 @@ on:
         description: 'Snapshot Name(s) (supports comma-separated list, matched sequentially)'
         required: true
         type: string
-        default: 'test1-snapshot,test2.snapshot'
+        default: 'none'
       d1:
-        description: 'Independent Delays in seconds (e.g. 20 for all, or 10,30 for sequential)'
-        required: false
-        type: string
-        default: '20'
+         description: 'Independent Delays in minutes (e.g. 20 for all, or 10,30 for sequential)'
+         required: false
+         type: string
+         default: 'none'
 
 jobs:
   run-snapshot-job:
