@@ -55,13 +55,12 @@ if ($vmNames.Count -eq 0) {
     exit 1
 }
 
-# Pre-load and initialize the Nutanix snap-in on the main thread
-# This ensures the assembly and types are loaded before any runspace uses them.
+# Pre-load the Nutanix snap-in on the main thread to avoid per-worker initialization overhead
 function Initialize-Nutanix {
     if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
         Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
     }
-    # Force initialization by calling a dummy command (e.g., get version)
+    # Force full initialization by invoking a dummy command
     $null = Get-Command Connect-NTNXCluster -ErrorAction SilentlyContinue
 }
 
@@ -71,7 +70,7 @@ try {
     Write-Warning "Failed to pre-load Nutanix snap-in: $($_.Exception.Message)"
 }
 
-# Create an InitialSessionState that imports the snap-in – this will be used for the runspace pool.
+# Create an InitialSessionState that imports the snap-in – shared by all runspaces
 $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
 $warning = $null
 try {
@@ -80,23 +79,23 @@ try {
     Write-Warning "Failed to import Nutanix snap-in into InitialSessionState: $($_.Exception.Message)"
 }
 
-# Define a mutex name to serialize snap-in loading, in case any runspace still needs to load it.
+# Mutex name to serialize snap-in loading, just in case any worker still needs to load it
 $mutexName = "Global\NutanixSnapinLoadMutex"
 
 # -----------------------------------------------------------------
 # WORKER SCRIPT BLOCK
 # -----------------------------------------------------------------
 $workerBlock = {
-    param($siteIp, $user, $pass, $vmName, $snapName, $op, $scriptStartUtc, $delay)
+    param($siteIp, $user, $pass, $vmName, $snapName, $op, $launchTimeUtc, $delay)
 
     function Write-Log($msg) {
         $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         Write-Output "[$timestamp] [VM: $vmName] $msg"
     }
 
-    Write-Log "Worker started. Scheduled delay: $delay seconds from script start."
+    Write-Log "Worker launched. Scheduled delay: $delay seconds from launch time."
 
-    # Ensure the snap-in is loaded; use a mutex to prevent file conflicts.
+    # Ensure the snap-in is loaded (should already be present from ISS, but guard against edge cases)
     if (-not (Get-Command Connect-NTNXCluster -ErrorAction SilentlyContinue)) {
         Write-Log "Snap-in not found, attempting to load with mutex..."
         $mutex = $null
@@ -112,12 +111,11 @@ $workerBlock = {
         } catch {
             Write-Error "Failed to load Nutanix snap-in: $($_.Exception.Message)"
             $mutex.ReleaseMutex()
+            $mutex.Dispose()
             return
         }
         $mutex.ReleaseMutex()
         $mutex.Dispose()
-    } else {
-        Write-Log "Snap-in already loaded in this runspace."
     }
 
     # 1. Connect to Prism
@@ -162,12 +160,12 @@ $workerBlock = {
         }
     }
 
-    # 4. Wait until the scheduled time (script start + delay)
+    # 4. Wait until the scheduled time (launch time + delay)
     $now = [DateTime]::UtcNow
-    $elapsed = ($now - $scriptStartUtc).TotalSeconds
+    $elapsed = ($now - $launchTimeUtc).TotalSeconds
     $remaining = $delay - $elapsed
     if ($remaining -gt 0) {
-        Write-Log "Elapsed since script start: $([math]::Round($elapsed, 2)) sec. Waiting $([math]::Round($remaining, 2)) more seconds..."
+        Write-Log "Elapsed since launch: $([math]::Round($elapsed, 2)) sec. Waiting $([math]::Round($remaining, 2)) more seconds..."
         Start-Sleep -Seconds $remaining
         Write-Log "Scheduled time reached. Proceeding with operation."
     } else {
@@ -234,13 +232,11 @@ $workerBlock = {
 }
 
 # -----------------------------------------------------------------
-# Launch runspaces immediately
+# Launch runspaces – capture launch time for each worker
 # -----------------------------------------------------------------
 $runspaces = @()
 $pool = [RunspaceFactory]::CreateRunspacePool(1, $vmNames.Count, $iss, $Host)
 $pool.Open()
-
-$scriptStartUtc = [DateTime]::UtcNow
 
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
     $vmName = $vmNames[$i]
@@ -266,6 +262,10 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
 
     [void]$ps.AddCommand("Invoke-Command")
     [void]$ps.AddParameter("ScriptBlock", $workerBlock)
+
+    # Capture launch time just before starting the worker
+    $launchTime = [DateTime]::UtcNow
+
     $argsList = @(
         $siteMap[$siteName],
         $env:PE_USER,
@@ -273,7 +273,7 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
         $vmName,
         $snapName,
         $op,
-        $scriptStartUtc,
+        $launchTime,
         $delay
     )
     [void]$ps.AddParameter("ArgumentList", $argsList)
