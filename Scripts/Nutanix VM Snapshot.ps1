@@ -55,26 +55,47 @@ if ($vmNames.Count -eq 0) {
     exit 1
 }
 
+# Pre-load Nutanix snap-in on the main thread to ensure it's available
+function Initialize-Nutanix {
+    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
+        Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
+    }
+}
+try {
+    Initialize-Nutanix
+} catch {
+    Write-Warning "Failed to pre-load Nutanix snap-in: $($_.Exception.Message)"
+}
+
+# Create an InitialSessionState that imports the snap-in – shared by all runspaces
+$iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+$warning = $null
+try {
+    $iss.ImportPSSnapIn("NutanixCmdletsPSSnapin", [ref]$warning)
+} catch {
+    Write-Warning "Failed to import Nutanix snap-in into InitialSessionState: $($_.Exception.Message)"
+}
+
 # -----------------------------------------------------------------
-# Define the job script block – does prep work, then waits, then acts
+# WORKER SCRIPT BLOCK – does prep work, waits, then performs action
 # -----------------------------------------------------------------
-$jobScript = {
-    param($siteIp, $user, $pass, $vmName, $snapName, $op, $scheduledStartUtc)
+$workerBlock = {
+    param($siteIp, $user, $pass, $vmName, $snapName, $op, $scriptStartUtc, $delay)
 
     function Write-Log($msg) {
         $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         Write-Output "[$timestamp] [VM: $vmName] $msg"
     }
 
-    Write-Log "Background job started. Scheduled operation time: $($scheduledStartUtc.ToString('HH:mm:ss')) UTC"
+    Write-Log "Worker started. Scheduled delay: $delay seconds from script start."
 
-    # Load Nutanix snap-in
+    # Ensure the snap-in is loaded in this runspace (should already be from ISS)
     try {
-        if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
+        if (-not (Get-Command Connect-NTNXCluster -ErrorAction SilentlyContinue)) {
             Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
         }
     } catch {
-        Write-Error "Failed to load Nutanix snap-in: $($_.Exception.Message)"
+        Write-Error "Failed to load Nutanix snap-in inside worker: $($_.Exception.Message)"
         return
     }
 
@@ -120,15 +141,16 @@ $jobScript = {
         }
     }
 
-    # 4. Wait until scheduled time
+    # 4. Wait until the scheduled time (script start + delay)
     $now = [DateTime]::UtcNow
-    $remainingSeconds = ($scheduledStartUtc - $now).TotalSeconds
-    if ($remainingSeconds -gt 0) {
-        Write-Log "Waiting $([math]::Round($remainingSeconds, 2)) seconds until scheduled operation time..."
-        Start-Sleep -Seconds $remainingSeconds
+    $elapsed = ($now - $scriptStartUtc).TotalSeconds
+    $remaining = $delay - $elapsed
+    if ($remaining -gt 0) {
+        Write-Log "Waiting $([math]::Round($remaining, 2)) seconds until scheduled operation time..."
+        Start-Sleep -Seconds $remaining
         Write-Log "Scheduled time reached. Proceeding with operation."
     } else {
-        Write-Warning "Scheduled time has already passed. Proceeding immediately."
+        Write-Warning "Scheduled time has already passed (delay may have been too small). Proceeding immediately."
     }
 
     # 5. Perform the final operation
@@ -191,10 +213,13 @@ $jobScript = {
 }
 
 # -----------------------------------------------------------------
-# Launch background jobs for each VM
+# Launch runspaces immediately – each does prep work, then waits
 # -----------------------------------------------------------------
-$nowUtc = [DateTime]::UtcNow
-$jobs = @()
+$runspaces = @()
+$pool = [RunspaceFactory]::CreateRunspacePool(1, $vmNames.Count, $iss, $Host)
+$pool.Open()
+
+$scriptStartUtc = [DateTime]::UtcNow
 
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
     $vmName = $vmNames[$i]
@@ -213,58 +238,71 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
             $delay = $delays[$delays.Count - 1]
         }
     }
+    Write-Output "VM '$vmName' scheduled delay: $delay seconds."
 
-    $scheduledStart = $nowUtc.AddSeconds($delay)
-    Write-Output "VM '$vmName' scheduled to start at $($scheduledStart.ToString('HH:mm:ss')) UTC (delay $delay sec)"
+    $ps = [PowerShell]::Create()
+    $ps.RunspacePool = $pool
 
-    $job = Start-Job -ScriptBlock $jobScript -ArgumentList @(
+    # Build command with the worker block
+    [void]$ps.AddCommand("Invoke-Command")
+    [void]$ps.AddParameter("ScriptBlock", $workerBlock)
+    $argsList = @(
         $siteMap[$siteName],
         $env:PE_USER,
         $env:PE_PASS,
         $vmName,
         $snapName,
         $op,
-        $scheduledStart
+        $scriptStartUtc,
+        $delay
     )
-    $jobs += [PSCustomObject]@{
-        Job    = $job
-        VMName = $vmName
+    [void]$ps.AddParameter("ArgumentList", $argsList)
+
+    # Start the worker immediately
+    $handle = $ps.BeginInvoke()
+
+    $runspaces += [PSCustomObject]@{
+        PowerShell = $ps
+        Handle     = $handle
+        VMName     = $vmName
     }
 }
 
-Write-Output "Dispatched all background jobs. Waiting for completion..."
+Write-Output "Dispatched all workers. Waiting for completion..."
 
-# Wait for all jobs to finish
-foreach ($jobObj in $jobs) {
-    $job = $jobObj.Job
-    Wait-Job -Job $job | Out-Null
+# Wait for all to finish
+while ($true) {
+    $active = $runspaces | Where-Object { -not $_.Handle.IsCompleted }
+    if ($active.Count -eq 0) { break }
+    Start-Sleep -Milliseconds 300
 }
 
-# Collect output and errors
-$hasErrors = $false
-foreach ($jobObj in $jobs) {
-    $job = $jobObj.Job
-    $vmName = $jobObj.VMName
+Write-Output "All workers completed."
 
+# Collect results
+$hasErrors = $false
+foreach ($r in $runspaces) {
     Write-Output "`n======================================================================"
-    Write-Output "LOG STREAM: VM '$vmName'"
+    Write-Output "LOG STREAM: VM '$($r.VMName)'"
     Write-Output "======================================================================"
 
-    $output = Receive-Job -Job $job
+    $output = $r.PowerShell.EndInvoke($r.Handle)
     foreach ($line in $output) {
         Write-Output $line
     }
 
-    # Check for errors in the job's error stream
-    if ($job.Error.Count -gt 0) {
+    if ($r.PowerShell.Streams.Error.Count -gt 0) {
         $hasErrors = $true
-        foreach ($err in $job.Error) {
-            Write-Error "[VM: $vmName] $err"
+        foreach ($err in $r.PowerShell.Streams.Error) {
+            Write-Error "[VM: $($r.VMName)] $err"
         }
     }
 
-    Remove-Job -Job $job
+    $r.PowerShell.Dispose()
 }
+
+$pool.Close()
+$pool.Dispose()
 
 if ($hasErrors) {
     exit 1
