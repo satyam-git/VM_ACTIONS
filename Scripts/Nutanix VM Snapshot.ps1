@@ -21,7 +21,10 @@ $snapNames = $snapInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object
 # Split delays and ensure it remains a strongly-typed array to prevent scalar unwrapping in Windows PowerShell
 $delays = @()
 if ($delayInput) {
-    $delays = @($delayInput.Split(",") | ForEach-Object { [int]$_.Trim() })
+    $delays = @($delayInput.Split(",") | ForEach-Object { 
+        $v = $_.Trim()
+        if ($v -ne "") { [int]$v }
+    } | Where-Object { $_ -ne $null })
 }
 
 if ($vmNames.Count -eq 0) {
@@ -53,7 +56,19 @@ $pool.Open()
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
     $vmName = $vmNames[$i]
     $snapName = if ($i -lt $snapNames.Count) { $snapNames[$i] } else { "$vmName-snapshot" }
-    $delay = if ($i -lt $delays.Count) { $delays[$i] } else { 0 }
+    
+    $delay = 0
+    if ($delays.Count -eq 0) {
+        $delay = 20
+    } elseif ($delays.Count -eq 1) {
+        $delay = $delays[0]
+    } else {
+        if ($i -lt $delays.Count) {
+            $delay = $delays[$i]
+        } else {
+            $delay = $delays[$delays.Count - 1]
+        }
+    }
     
     $ps = [PowerShell]::Create()
     $ps.RunspacePool = $pool
