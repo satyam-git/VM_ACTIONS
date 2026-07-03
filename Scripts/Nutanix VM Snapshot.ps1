@@ -17,12 +17,6 @@ Write-Output "Parsed op (Op): $($data.op)"
 Write-Output "Parsed sn1 (Snaps): $($data.sn1)"
 Write-Output "Parsed d1 (Delays): $($data.d1)"
 
-function Initialize-Nutanix {
-    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
-        Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
-    }
-}
-
 $siteMap = @{ "Bangalore" = "192.168.136.50"; "Pune" = "10.0.0.20"; "Chennai" = "10.0.0.10" }
 $siteName = [string]$data.s1
 $vmInput = [string]$data.v1
@@ -61,38 +55,22 @@ if ($vmNames.Count -eq 0) {
     exit 1
 }
 
-# Pre-initialize Nutanix on the host thread for assembly caching
-try {
-    Initialize-Nutanix
-} catch {
-    Write-Warning "Failed to pre-load Nutanix snap-in on host thread: $($_.Exception.Message)"
-}
-
-# Create an InitialSessionState that pre‑imports the Nutanix snap‑in
-$iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-$warning = $null
-try {
-    $iss.ImportPSSnapIn("NutanixCmdletsPSSnapin", [ref]$warning)
-} catch {
-    Write-Warning "Failed to pre-import Nutanix snap-in into InitialSessionState: $($_.Exception.Message)"
-}
-
 # -----------------------------------------------------------------
-# WORKER SCRIPT BLOCK – connects immediately, then waits for scheduled time
+# Define the job script block – does prep work, then waits, then acts
 # -----------------------------------------------------------------
-$workerBlock = {
+$jobScript = {
     param($siteIp, $user, $pass, $vmName, $snapName, $op, $scheduledStartUtc)
-    
+
     function Write-Log($msg) {
         $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         Write-Output "[$timestamp] [VM: $vmName] $msg"
     }
-    
-    Write-Log "Worker started. Scheduled operation time: $($scheduledStartUtc.ToString('HH:mm:ss')) UTC"
 
-    # Ensure the snap‑in is loaded in this runspace
+    Write-Log "Background job started. Scheduled operation time: $($scheduledStartUtc.ToString('HH:mm:ss')) UTC"
+
+    # Load Nutanix snap-in
     try {
-        if (-not (Get-Command Connect-NTNXCluster -ErrorAction SilentlyContinue)) {
+        if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
             Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
         }
     } catch {
@@ -100,30 +78,61 @@ $workerBlock = {
         return
     }
 
+    # 1. Connect to Prism
     try {
         Write-Log "Connecting to Prism Element on $siteIp..."
         $creds = ConvertTo-SecureString $pass -AsPlainText -Force
         Connect-NTNXCluster -Server $siteIp -UserName $user -Password $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
         Write-Log "Connected successfully."
+    } catch {
+        Write-Error "Connection failed: $($_.Exception.Message)"
+        return
+    }
 
-        # Calculate remaining time until scheduled start
-        $now = [DateTime]::UtcNow
-        $remainingSeconds = ($scheduledStartUtc - $now).TotalSeconds
-        if ($remainingSeconds -gt 0) {
-            Write-Log "Waiting $([math]::Round($remainingSeconds, 2)) seconds until scheduled operation time..."
-            Start-Sleep -Seconds $remainingSeconds
-            Write-Log "Scheduled time reached. Proceeding with operation."
-        } else {
-            Write-Warning "Scheduled time has already passed (delay may have been too short). Proceeding immediately."
-        }
-
+    # 2. Get VM
+    try {
         Write-Log "Locating target VM..."
         $vm = Get-NTNXVM -SearchString $vmName | Where-Object { $_.vmName -eq $vmName } | Select-Object -First 1
         if (-not $vm) {
             throw "VM '$vmName' was not found on cluster."
         }
         Write-Log "VM found with UUID: $($vm.uuid). PowerState: $($vm.powerState)"
+    } catch {
+        Write-Error "VM lookup failed: $($_.Exception.Message)"
+        Disconnect-NTNXCluster -Servers * -ErrorAction SilentlyContinue
+        return
+    }
 
+    # 3. For Delete/Restore, get snapshot UUID
+    $snap = $null
+    if ($op -in @("2", "3")) {
+        try {
+            Write-Log "Searching for snapshot '$snapName'..."
+            $snap = Get-NTNXSnapshot | Where-Object { $_.vmUuid -eq $vm.uuid -and $_.snapshotName -eq $snapName }
+            if (-not $snap) {
+                throw "Snapshot '$snapName' not found for VM '$vmName'."
+            }
+            Write-Log "Snapshot found with UUID: $($snap.uuid)"
+        } catch {
+            Write-Error "Snapshot lookup failed: $($_.Exception.Message)"
+            Disconnect-NTNXCluster -Servers * -ErrorAction SilentlyContinue
+            return
+        }
+    }
+
+    # 4. Wait until scheduled time
+    $now = [DateTime]::UtcNow
+    $remainingSeconds = ($scheduledStartUtc - $now).TotalSeconds
+    if ($remainingSeconds -gt 0) {
+        Write-Log "Waiting $([math]::Round($remainingSeconds, 2)) seconds until scheduled operation time..."
+        Start-Sleep -Seconds $remainingSeconds
+        Write-Log "Scheduled time reached. Proceeding with operation."
+    } else {
+        Write-Warning "Scheduled time has already passed. Proceeding immediately."
+    }
+
+    # 5. Perform the final operation
+    try {
         switch ($op) {
             "1" { # CREATE
                 Write-Log "Creating snapshot '$snapName'..."
@@ -134,44 +143,38 @@ $workerBlock = {
                 Write-Log "SUCCESS: Created snapshot '$snapName'"
             }
             "2" { # DELETE
-                Write-Log "Searching for snapshot '$snapName'..."
-                $snap = Get-NTNXSnapshot | Where-Object { $_.vmUuid -eq $vm.uuid -and $_.snapshotName -eq $snapName }
-                if (-not $snap) { throw "Snapshot '$snapName' not found." }
                 Write-Log "Deleting snapshot '$snapName'..."
                 Remove-NTNXSnapshot -Uuid $snap.uuid -ErrorAction Stop | Out-Null
                 Write-Log "SUCCESS: Deleted snapshot '$snapName'"
             }
             "3" { # RESTORE
-                Write-Log "Searching for snapshot '$snapName'..."
-                $snap = Get-NTNXSnapshot | Where-Object { $_.vmUuid -eq $vm.uuid -and $_.snapshotName -eq $snapName }
-                if (-not $snap) { throw "Snapshot '$snapName' not found." }
-
+                Write-Log "Restoring VM from snapshot '$snapName'..."
                 if ($vm.powerState -eq "ON") {
                     Write-Log "VM is powered ON. Initiating ACPI graceful shutdown..."
                     Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction Stop | Out-Null
-                    
                     $isOff = $false
-                    for($attempt = 1; $attempt -le 10; $attempt++) {
+                    for ($attempt = 1; $attempt -le 10; $attempt++) {
                         Write-Log "Waiting 30 seconds for shutdown (Attempt $attempt/10)..."
                         Start-Sleep -Seconds 30
                         $checkVm = Get-NTNXVM -Vmid $vm.uuid
-                        if ($checkVm.powerState -eq "OFF") { 
+                        if ($checkVm.powerState -eq "OFF") {
                             $isOff = $true
                             Write-Log "VM shutdown validated."
-                            break 
+                            break
                         }
                         if ($attempt -lt 10) {
                             Write-Log "VM still ON, re‑triggering ACPI shutdown..."
                             Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction Stop | Out-Null
                         }
                     }
-                    if (-not $isOff) { throw "VM failed to shut down after multiple attempts." }
+                    if (-not $isOff) {
+                        throw "VM failed to shut down after multiple attempts."
+                    }
                 }
 
                 Write-Log "Waiting 60 seconds for hypervisor to release locks..."
                 Start-Sleep -Seconds 60
 
-                Write-Log "Restoring VM from snapshot '$snapName'..."
                 Restore-NTNXVirtualMachine -Vmid $vm.uuid -SnapshotUuid $snap.uuid -ErrorAction Stop | Out-Null
                 Write-Log "Block storage reverted."
 
@@ -181,25 +184,22 @@ $workerBlock = {
             }
         }
     } catch {
-        Write-Error "CRITICAL FAILURE: $($_.Exception.Message)"
+        Write-Error "CRITICAL FAILURE during operation: $($_.Exception.Message)"
     } finally {
         Disconnect-NTNXCluster -Servers * -ErrorAction SilentlyContinue
     }
 }
 
 # -----------------------------------------------------------------
-# LAUNCH ALL WORKERS IMMEDIATELY
+# Launch background jobs for each VM
 # -----------------------------------------------------------------
-$runspaces = @()
-$pool = [RunspaceFactory]::CreateRunspacePool(1, $vmNames.Count, $iss, $Host)
-$pool.Open()
-
 $nowUtc = [DateTime]::UtcNow
+$jobs = @()
 
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
     $vmName = $vmNames[$i]
     $snapName = if ($i -lt $snapNames.Count) { $snapNames[$i] } else { "$vmName-snapshot" }
-    
+
     # Determine delay for this VM
     $delay = 0
     if ($delays.Count -eq 0) {
@@ -214,17 +214,10 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
         }
     }
 
-    # Compute absolute scheduled start time (UTC)
     $scheduledStart = $nowUtc.AddSeconds($delay)
     Write-Output "VM '$vmName' scheduled to start at $($scheduledStart.ToString('HH:mm:ss')) UTC (delay $delay sec)"
 
-    $ps = [PowerShell]::Create()
-    $ps.RunspacePool = $pool
-
-    # Build command with the worker block
-    [void]$ps.AddCommand("Invoke-Command")
-    [void]$ps.AddParameter("ScriptBlock", $workerBlock)
-    $argsList = @(
+    $job = Start-Job -ScriptBlock $jobScript -ArgumentList @(
         $siteMap[$siteName],
         $env:PE_USER,
         $env:PE_PASS,
@@ -233,53 +226,45 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
         $op,
         $scheduledStart
     )
-    [void]$ps.AddParameter("ArgumentList", $argsList)
-
-    # Start the worker immediately
-    $handle = $ps.BeginInvoke()
-    
-    $runspaces += [PSCustomObject]@{
-        PowerShell = $ps
-        Handle     = $handle
-        VMName     = $vmName
+    $jobs += [PSCustomObject]@{
+        Job    = $job
+        VMName = $vmName
     }
 }
 
-Write-Output "Dispatched all workers. Waiting for completion..."
+Write-Output "Dispatched all background jobs. Waiting for completion..."
 
-# Wait for all to finish
-while ($true) {
-    $active = $runspaces | Where-Object { -not $_.Handle.IsCompleted }
-    if ($active.Count -eq 0) { break }
-    Start-Sleep -Milliseconds 300
+# Wait for all jobs to finish
+foreach ($jobObj in $jobs) {
+    $job = $jobObj.Job
+    Wait-Job -Job $job | Out-Null
 }
 
-Write-Output "All workers completed."
-
-# Collect results
+# Collect output and errors
 $hasErrors = $false
-foreach ($r in $runspaces) {
+foreach ($jobObj in $jobs) {
+    $job = $jobObj.Job
+    $vmName = $jobObj.VMName
+
     Write-Output "`n======================================================================"
-    Write-Output "LOG STREAM: VM '$($r.VMName)'"
+    Write-Output "LOG STREAM: VM '$vmName'"
     Write-Output "======================================================================"
-    
-    $output = $r.PowerShell.EndInvoke($r.Handle)
+
+    $output = Receive-Job -Job $job
     foreach ($line in $output) {
         Write-Output $line
     }
 
-    if ($r.PowerShell.Streams.Error.Count -gt 0) {
+    # Check for errors in the job's error stream
+    if ($job.Error.Count -gt 0) {
         $hasErrors = $true
-        foreach ($err in $r.PowerShell.Streams.Error) {
-            Write-Error "[VM: $($r.VMName)] $err"
+        foreach ($err in $job.Error) {
+            Write-Error "[VM: $vmName] $err"
         }
     }
-    
-    $r.PowerShell.Dispose()
-}
 
-$pool.Close()
-$pool.Dispose()
+    Remove-Job -Job $job
+}
 
 if ($hasErrors) {
     exit 1
