@@ -29,115 +29,166 @@ if ($vmNames.Count -eq 0) {
     exit 1
 }
 
-$jobs = @()
+# Initialize Runspace Pools for lightweight, secure, and profile-free parallel execution.
+$runspaces = @()
+$pool = [RunspaceFactory]::CreateRunspacePool(1, $vmNames.Count)
+$pool.Open()
 
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
     $vmName = $vmNames[$i]
-    
-    # Determine corresponding snapshot name and delay
     $snapName = if ($i -lt $snapNames.Count) { $snapNames[$i] } else { "$vmName-snapshot" }
     $delay = if ($i -lt $delays.Count) { $delays[$i] } else { 0 }
     
-    # Run the job in parallel using Start-Job
-    $job = Start-Job -ScriptBlock {
+    $ps = [PowerShell]::Create()
+    $ps.RunspacePool = $pool
+    
+    # We pass variables securely as arguments
+    [void]$ps.AddScript({
         param($siteIp, $user, $pass, $vmName, $snapName, $op, $delay)
+        
+        function Write-Log($msg) {
+            $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            Write-Output "[$timestamp] [VM: $vmName] $msg"
+        }
         
         try {
             if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
                 Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
             }
+        } catch {
+            Write-Error "Failed to load Nutanix snap-in: $($_.Exception.Message)"
+            return
+        }
 
-            # Handle Independent Delay
-            if ($delay -gt 0) {
-                Write-Output "[VM: $vmName] Initiating independent start delay of $delay seconds..."
-                Start-Sleep -Seconds $delay
-            }
+        if ($delay -gt 0) {
+            Write-Log "Delaying execution by $delay seconds..."
+            Start-Sleep -Seconds $delay
+            Write-Log "Delay completed. Resuming operation."
+        } else {
+            Write-Log "Starting execution immediately."
+        }
 
-            Write-Output "[VM: $vmName] Connecting to Prism Element on $siteIp..."
+        try {
+            Write-Log "Connecting to Prism Element on $siteIp..."
             $creds = ConvertTo-SecureString $pass -AsPlainText -Force
             Connect-NTNXCluster -Server $siteIp -UserName $user -Password $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
+            Write-Log "Connected successfully."
 
-            Write-Output "[VM: $vmName] Locating target VM..."
+            Write-Log "Locating target VM..."
             $vm = Get-NTNXVM -SearchString $vmName | Where-Object { $_.vmName -eq $vmName } | Select-Object -First 1
             if (-not $vm) {
                 throw "VM '$vmName' was not found on cluster."
             }
+            Write-Log "VM found with UUID: $($vm.uuid). PowerState: $($vm.powerState)"
 
             switch ($op) {
                 "1" { # CREATE
-                    Write-Output "[VM: $vmName] Creating snapshot '$snapName'..."
+                    Write-Log "Creating snapshot '$snapName'..."
                     $spec = New-NTNXObject -Name SnapshotSpecDTO
                     $spec.vmUuid = $vm.uuid
                     $spec.snapshotName = $snapName
                     New-NTNXSnapshot -SnapshotSpecs $spec -ErrorAction Stop | Out-Null
-                    Write-Output "SUCCESS: Created snapshot '$snapName' on VM '$vmName'"
+                    Write-Log "SUCCESS: Created snapshot '$snapName'"
                 }
                 "2" { # DELETE
-                    Write-Output "[VM: $vmName] Deleting snapshot '$snapName'..."
+                    Write-Log "Searching for snapshot '$snapName'..."
                     $snap = Get-NTNXSnapshot | Where-Object { $_.vmUuid -eq $vm.uuid -and $_.snapshotName -eq $snapName }
-                    if (-not $snap) { throw "Snapshot '$snapName' not found on VM '$vmName'." }
+                    if (-not $snap) { throw "Snapshot '$snapName' not found." }
+                    Write-Log "Deleting snapshot '$snapName'..."
                     Remove-NTNXSnapshot -Uuid $snap.uuid -ErrorAction Stop | Out-Null
-                    Write-Output "SUCCESS: Deleted snapshot '$snapName' on VM '$vmName'"
+                    Write-Log "SUCCESS: Deleted snapshot '$snapName'"
                 }
                 "3" { # RESTORE
-                    Write-Output "[VM: $vmName] Restoring snapshot '$snapName'..."
+                    Write-Log "Searching for snapshot '$snapName'..."
                     $snap = Get-NTNXSnapshot | Where-Object { $_.vmUuid -eq $vm.uuid -and $_.snapshotName -eq $snapName }
-                    if (-not $snap) { throw "Snapshot '$snapName' not found on VM '$vmName'." }
+                    if (-not $snap) { throw "Snapshot '$snapName' not found." }
 
                     if ($vm.powerState -eq "ON") {
-                        Write-Output "[VM: $vmName] Initiating ACPI graceful shutdown..."
+                        Write-Log "VM is currently powered ON. Initiating ACPI graceful shutdown..."
                         Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction Stop | Out-Null
                         
-                        # Verification loop: Poll power status every 10s for up to 5 minutes
                         $isOff = $false
                         for($j=0; $j -lt 30; $j++) {
                             Start-Sleep -Seconds 10
                             $checkVm = Get-NTNXVM -Vmid $vm.uuid
                             if ($checkVm.powerState -eq "OFF") { $isOff = $true; break }
-                            Write-Output "[VM: $vmName] Waiting for graceful shutdown... ($(($j+1)*10)s)"
+                            Write-Log "Waiting for graceful shutdown... ($(($j+1)*10)s)"
                         }
-                        if (-not $isOff) { throw "VM '$vmName' failed to shut down gracefully." }
+                        if (-not $isOff) { throw "VM failed to shut down gracefully within 5 minutes." }
                     }
-                    
-                    # MANDATORY DELAY: Allow hypervisor to release disk locks
-                    Write-Output "[VM: $vmName] Waiting 60 seconds before initiating restore to prevent SCSI reservation lock conflicts..."
+
+                    Write-Log "Waiting 60 seconds to allow the hypervisor to release disk locks..."
                     Start-Sleep -Seconds 60
-                    
+
+                    Write-Log "Restoring VM state from snapshot '$snapName'..."
                     Restore-NTNXVirtualMachine -Vmid $vm.uuid -SnapshotUuid $snap.uuid -ErrorAction Stop | Out-Null
-                    Write-Output "[VM: $vmName] Reverted block-storage states cleanly to snapshot '$snapName'."
-                    
+                    Write-Log "Reverted block-storage states cleanly."
+
+                    Write-Log "Powering VM back ON..."
                     Set-NTNXVMPowerOn -Vmid $vm.uuid -ErrorAction Stop | Out-Null
-                    Write-Output "SUCCESS: Restore completed and powered ON VM '$vmName'"
+                    Write-Log "SUCCESS: Restore completed and powered ON successfully."
                 }
             }
         } catch {
-            Write-Error "[VM: $vmName] CRITICAL FAILURE: $($_.Exception.Message)"
+            Write-Error "CRITICAL FAILURE: $($_.Exception.Message)"
         } finally {
             Disconnect-NTNXCluster -Servers * -ErrorAction SilentlyContinue
         }
-    } -ArgumentList $siteMap[$siteName], $env:PE_USER, $env:PE_PASS, $vmName, $snapName, $op, $delay
+    })
+    
+    [void]$ps.AddArgument($siteMap[$siteName])
+    [void]$ps.AddArgument($env:PE_USER)
+    [void]$ps.AddArgument($env:PE_PASS)
+    [void]$ps.AddArgument($vmName)
+    [void]$ps.AddArgument($snapName)
+    [void]$ps.AddArgument($op)
+    [void]$ps.AddArgument($delay)
 
-    $jobs += $job
-}
-
-Write-Output "Dispatched parallel snapshot operations for $($vmNames.Count) VMs."
-Write-Output "Waiting for all parallel threads to complete (No sequential blockages)..."
-$jobs | Wait-Job | Out-Null
-
-# Retrieve outputs and check for errors
-$hasErrors = $false
-foreach ($j in $jobs) {
-    Write-Output "======================================================================"
-    Write-Output "LOG STREAM: VM '$($j.ChildJobs[0].JobParameters.ArgumentList[3])' with delay $($j.ChildJobs[0].JobParameters.ArgumentList[6])s"
-    Write-Output "======================================================================"
-    Receive-Job -Job $j
-    if ($j.State -eq "Failed") {
-        $hasErrors = $true
+    $handle = $ps.BeginInvoke()
+    
+    $runspaces += [PSCustomObject]@{
+        PowerShell = $ps
+        Handle     = $handle
+        VMName     = $vmName
     }
 }
 
-# Cleanup background jobs
-$jobs | Remove-Job
+Write-Output "Dispatched parallel thread-workers for $($vmNames.Count) VMs."
+Write-Output "Waiting for all parallel execution threads to complete..."
+
+while ($true) {
+    $active = $runspaces | Where-Object { -not $_.Handle.IsCompleted }
+    if ($active.Count -eq 0) { break }
+    Start-Sleep -Seconds 1
+}
+
+$hasErrors = $false
+
+# Retrieve and output results
+foreach ($r in $runspaces) {
+    Write-Output "`n======================================================================"
+    Write-Output "LOG STREAM: VM '$($r.VMName)'"
+    Write-Output "======================================================================"
+    
+    # Retrieve standard output
+    $output = $r.PowerShell.EndInvoke($r.Handle)
+    foreach ($line in $output) {
+        Write-Output $line
+    }
+
+    # Retrieve errors
+    if ($r.PowerShell.Streams.Error.Count -gt 0) {
+        $hasErrors = $true
+        foreach ($err in $r.PowerShell.Streams.Error) {
+            Write-Error "[VM: $($r.VMName)] $err"
+        }
+    }
+    
+    $r.PowerShell.Dispose()
+}
+
+$pool.Close()
+$pool.Dispose()
 
 if ($hasErrors) {
     exit 1
