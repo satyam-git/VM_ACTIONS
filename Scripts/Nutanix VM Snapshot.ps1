@@ -8,19 +8,25 @@ function Initialize-Nutanix {
 }
 
 $siteMap = @{ "Bangalore" = "192.168.136.50"; "Pune" = "10.0.0.20"; "Chennai" = "10.0.0.10" }
-$siteName = $data.s1
-$vmInput = $data.v1
-$op = $data.op # 1=Create, 2=Delete, 3=Restore
-$snapInput = $data.sn1
-$delayInput = $data.d1
+$siteName = [string]$data.s1
+$vmInput = [string]$data.v1
+$op = [string]$data.op # 1=Create, 2=Delete, 3=Restore
+$snapInput = [string]$data.sn1
+$delayInput = [string]$data.d1
 
 # Split comma-separated inputs
-$vmNames = $vmInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
-$snapNames = $snapInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+$vmNames = @()
+if ($vmInput -and $vmInput.Trim() -ne "") {
+    $vmNames = @($vmInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
+}
+$snapNames = @()
+if ($snapInput -and $snapInput.Trim() -ne "") {
+    $snapNames = @($snapInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
+}
 
 # Split delays and ensure it remains a strongly-typed array to prevent scalar unwrapping in Windows PowerShell
 $delays = @()
-if ($delayInput) {
+if ($delayInput -and $delayInput.Trim() -ne "") {
     $delays = @($delayInput.Split(",") | ForEach-Object { 
         $v = $_.Trim()
         if ($v -ne "") { [int]$v }
@@ -56,7 +62,6 @@ $pool.Open()
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
     $vmName = $vmNames[$i]
     $snapName = if ($i -lt $snapNames.Count) { $snapNames[$i] } else { "$vmName-snapshot" }
-    
     $delay = 0
     if ($delays.Count -eq 0) {
         $delay = 20
