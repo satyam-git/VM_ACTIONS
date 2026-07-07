@@ -188,8 +188,10 @@ $workerBlock = {
         }
     } catch {
         $errorMessage = $_.Exception.Message
-        if ($errorMessage -like "*was not found on cluster*" -or $errorMessage -like "*Snapshot*not found*") {
+        if ($errorMessage -like "*was not found on cluster*") {
             $workerStatus = "VM Not Found"
+        } elseif ($errorMessage -like "*Snapshot*not found*") {
+            $workerStatus = "Snapshot Name not Found"
         } else {
             $workerStatus = "failed"
         }
@@ -328,6 +330,8 @@ if ($env:GITHUB_STEP_SUMMARY) {
                 "Successful"
             } elseif ($res.Status -eq "VM Not Found") {
                 "VM Not Found"
+            } elseif ($res.Status -eq "Snapshot Name not Found") {
+                "Snapshot Name not Found"
             } else {
                 "failed"
             }
