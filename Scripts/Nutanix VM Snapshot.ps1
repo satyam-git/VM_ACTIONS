@@ -198,7 +198,8 @@ $workerBlock = {
         }
         Write-Log "CRITICAL FAILURE: $errorMessage"
     } finally {
-        # Connection cleanup is managed on the main thread at the script's end.
+        # Do not call Disconnect-NTNXCluster here to avoid cross-thread connection interference in the shared process space.
+        # Connection cleanup will be handled at the very end of the main thread.
         
         $actionName = switch ($op) {
             "1" { "create" }
@@ -207,7 +208,7 @@ $workerBlock = {
             default { "unknown" }
         }
 
-        # Output structural results object
+        # Output the structural results object as PSCustomObject with keys matching the requested exact column names
         [PSCustomObject]@{
             "VM Name"       = $vmName
             "Snapshot Name" = $snapName
@@ -219,10 +220,10 @@ $workerBlock = {
 }
 
 $runspaces = @()
-# Create the RunspacePool with both min and max set to the VM count, passing the loaded InitialSessionState ($iss) and $Host.
-# By forcing the minimum runspaces to equal the number of VMs, the pool pre-allocates and opens all runspaces immediately,
-# ensuring true, non-sequential parallel execution for independent delays.
-$pool = [RunspaceFactory]::CreateRunspacePool([int]$vmNames.Count, [int]$vmNames.Count, $iss, $Host)
+# Create the RunspacePool using the standard 2-argument signature (min, max).
+# This avoids passing $Host or $iss which can cause sequential host-synchronization locks.
+# By setting both min and max runspaces to the VM count, we guarantee that all VM threads execute in parallel.
+$pool = [RunspaceFactory]::CreateRunspacePool([int]$vmNames.Count, [int]$vmNames.Count)
 $pool.Open()
 
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
@@ -247,20 +248,17 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
     $ps = [PowerShell]::Create()
     $ps.RunspacePool = $pool
     
-    # Use Invoke-Command with Explicit ArgumentList to bind parameters to the worker script block perfectly.
-    [void]$ps.AddCommand("Invoke-Command")
-    [void]$ps.AddParameter("ScriptBlock", $workerBlock)
-    
-    $argsList = @(
-        $siteMap[$siteName],
-        $env:PE_USER,
-        $env:PE_PASS,
-        $vmName,
-        $snapName,
-        $op,
-        $delayMin   # pass minutes
-    )
-    [void]$ps.AddParameter("ArgumentList", $argsList)
+    # Execute the worker ScriptBlock directly on the PowerShell instance.
+    # This completely bypasses the Invoke-Command cmdlet, avoiding all host-routing or stream-serialization locks.
+    # Parameters are passed positionally using AddArgument to bind to the script block's param() definition.
+    [void]$ps.AddScript($workerBlock)
+    [void]$ps.AddArgument($siteMap[$siteName])
+    [void]$ps.AddArgument($env:PE_USER)
+    [void]$ps.AddArgument($env:PE_PASS)
+    [void]$ps.AddArgument($vmName)
+    [void]$ps.AddArgument($snapName)
+    [void]$ps.AddArgument($op)
+    [void]$ps.AddArgument($delayMin)
 
     $handle = $ps.BeginInvoke()
     
@@ -335,6 +333,8 @@ if ($env:GITHUB_STEP_SUMMARY) {
 | :--- | :--- | :--- | :--- |
 "@
         foreach ($res in $resultsList) {
+            # Normalize Status to exactly match capitalization/look from screenshot
+            # "Successful" (Capitalized), "failed" (Lowercase), "VM Not Found"
             $statusStr = if ($res.Status -eq "Successful") {
                 "Successful"
             } elseif ($res.Status -eq "VM Not Found") {
