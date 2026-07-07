@@ -116,7 +116,8 @@ $workerBlock = {
 
     try {
         Write-Log "Connecting to Prism Element on $siteIp..."
-        $creds = ConvertTo-SecureString $pass -AsPlainText -Force
+        $creds = [System.Security.SecureString]::new()
+        foreach ($c in $pass.ToCharArray()) { $creds.AppendChar($c) }
         Connect-NTNXCluster -Server $siteIp -UserName $user -Password $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
         Write-Log "Connected successfully."
 
@@ -233,7 +234,7 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
         $delayMin = $delayMinutes[0]
     } else {
         if ($i -lt $delayMinutes.Count) {
-            $delayMin = $delayMinutes[$i]
+            $delayMin = $delayMin = $delayMinutes[$i]
         } else {
             $delayMin = $delayMinutes[$delayMinutes.Count - 1]
         }
@@ -325,7 +326,7 @@ if ($env:GITHUB_STEP_SUMMARY) {
 "@
         foreach ($res in $resultsList) {
             # Normalize Status to exactly match capitalization/look from screenshot
-            # "Successful" (Capitalized), "failed" (Lowercase), "VM Not Found"
+            # "Successful" (Capitalized), "failed" (Lowercase), "VM Not Found", "Snapshot Name not Found"
             $statusStr = if ($res.Status -eq "Successful") {
                 "Successful"
             } elseif ($res.Status -eq "VM Not Found") {
