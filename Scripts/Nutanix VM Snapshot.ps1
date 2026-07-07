@@ -198,7 +198,8 @@ $workerBlock = {
         }
         Write-Log "CRITICAL FAILURE: $errorMessage"
     } finally {
-        Disconnect-NTNXCluster -Servers * -ErrorAction SilentlyContinue
+        # Do not call Disconnect-NTNXCluster here to avoid cross-thread connection interference in the shared process space.
+        # Connection cleanup will be handled at the very end of the main thread.
         
         $actionName = switch ($op) {
             "1" { "create" }
@@ -219,7 +220,8 @@ $workerBlock = {
 }
 
 $runspaces = @()
-$pool = [RunspaceFactory]::CreateRunspacePool(1, $vmNames.Count, $iss, $Host)
+# Set the min and max runspaces to the same count to ensure all VMs run concurrently without any sequential queue delay
+$pool = [RunspaceFactory]::CreateRunspacePool($vmNames.Count, $vmNames.Count, $iss, $Host)
 $pool.Open()
 
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
@@ -234,7 +236,7 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
         $delayMin = $delayMinutes[0]
     } else {
         if ($i -lt $delayMinutes.Count) {
-            $delayMin = $delayMin = $delayMinutes[$i]
+            $delayMin = $delayMinutes[$i]
         } else {
             $delayMin = $delayMinutes[$delayMinutes.Count - 1]
         }
@@ -269,46 +271,53 @@ for ($i = 0; $i -lt $vmNames.Count; $i++) {
 }
 
 Write-Output "Dispatched parallel thread-workers for $($vmNames.Count) VMs."
-Write-Output "Waiting for all parallel execution threads to complete..."
-
-while ($true) {
-    $active = $runspaces | Where-Object { -not $_.Handle.IsCompleted }
-    if ($active.Count -eq 0) { break }
-    Start-Sleep -Seconds 1
-}
+Write-Output "Waiting for parallel execution threads to complete..."
 
 $hasErrors = $false
 $resultsList = @()
+$completedRunspaces = @{}
+$completedCount = 0
 
-# Retrieve and output results
-foreach ($r in $runspaces) {
-    Write-Output "`n======================================================================"
-    Write-Output "LOG STREAM: VM '$($r.VMName)'"
-    Write-Output "======================================================================"
-    
-    # Retrieve standard output and check for the PSCustomObject result
-    $output = $r.PowerShell.EndInvoke($r.Handle)
-    foreach ($line in $output) {
-        if ($line -is [System.Management.Automation.PSCustomObject] -and $line.PSObject.Properties['VM Name'] -ne $null) {
-            $resultsList += $line
-        } else {
-            Write-Output $line
+while ($completedCount -lt $runspaces.Count) {
+    foreach ($r in $runspaces) {
+        if (-not $completedRunspaces[$r.VMName] -and $r.Handle.IsCompleted) {
+            Write-Output "`n======================================================================"
+            Write-Output "LOG STREAM: VM '$($r.VMName)'"
+            Write-Output "======================================================================"
+            
+            # Retrieve standard output and check for the PSCustomObject result
+            $output = $r.PowerShell.EndInvoke($r.Handle)
+            foreach ($line in $output) {
+                if ($line -is [System.Management.Automation.PSCustomObject] -and $line.PSObject.Properties['VM Name'] -ne $null) {
+                    $resultsList += $line
+                } else {
+                    Write-Output $line
+                }
+            }
+
+            # Retrieve errors
+            if ($r.PowerShell.Streams.Error.Count -gt 0) {
+                $hasErrors = $true
+                foreach ($err in $r.PowerShell.Streams.Error) {
+                    Write-Error "[VM: $($r.VMName)] $err"
+                }
+            }
+            
+            $r.PowerShell.Dispose()
+            $completedRunspaces[$r.VMName] = $true
+            $completedCount++
         }
     }
-
-    # Retrieve errors
-    if ($r.PowerShell.Streams.Error.Count -gt 0) {
-        $hasErrors = $true
-        foreach ($err in $r.PowerShell.Streams.Error) {
-            Write-Error "[VM: $($r.VMName)] $err"
-        }
-    }
-    
-    $r.PowerShell.Dispose()
+    Start-Sleep -Seconds 1
 }
 
 $pool.Close()
 $pool.Dispose()
+
+# Cleanup connections at the very end of the main script
+try {
+    Disconnect-NTNXCluster -Servers * -ErrorAction SilentlyContinue
+} catch {}
 
 # Create table matching screenshot exactly: VM Name | Snapshot Name | Action | Status
 Write-Output "`n===== EXECUTED RESULTS ====="
@@ -326,7 +335,7 @@ if ($env:GITHUB_STEP_SUMMARY) {
 "@
         foreach ($res in $resultsList) {
             # Normalize Status to exactly match capitalization/look from screenshot
-            # "Successful" (Capitalized), "failed" (Lowercase), "VM Not Found", "Snapshot Name not Found"
+            # "Successful" (Capitalized), "failed" (Lowercase), "VM Not Found"
             $statusStr = if ($res.Status -eq "Successful") {
                 "Successful"
             } elseif ($res.Status -eq "VM Not Found") {
