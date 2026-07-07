@@ -220,9 +220,9 @@ $workerBlock = {
 }
 
 $runspaces = @()
-# Create the RunspacePool using the 3-argument signature (min, max, initialSessionState).
-# This avoids passing $Host (which can cause sequential host-synchronization locks) or passing $null (which triggers an argument null exception on Windows PowerShell 5.1).
-$pool = [RunspaceFactory]::CreateRunspacePool(1, [int]$vmNames.Count, $iss)
+# Create the RunspacePool using the 2-argument signature (min, max).
+# This avoids passing $iss or $Host, which eliminates host-synchronization locks and ensures true parallel execution.
+$pool = [RunspaceFactory]::CreateRunspacePool([int]$vmNames.Count, [int]$vmNames.Count)
 $pool.Open()
 
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
