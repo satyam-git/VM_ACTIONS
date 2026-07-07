@@ -97,7 +97,7 @@ $workerBlock = {
             Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
         }
     } catch {
-        Write-Error "Failed to load Nutanix snap-in inside background worker thread: $($_.Exception.Message)"
+        Write-Log "Failed to load Nutanix snap-in inside background worker thread: $($_.Exception.Message)"
         return
     }
 
@@ -187,9 +187,13 @@ $workerBlock = {
             }
         }
     } catch {
-        $workerStatus = "failed"
         $errorMessage = $_.Exception.Message
-        Write-Error "CRITICAL FAILURE: $errorMessage"
+        if ($errorMessage -like "*was not found on cluster*" -or $errorMessage -like "*Snapshot*not found*") {
+            $workerStatus = "VM Not Found"
+        } else {
+            $workerStatus = "failed"
+        }
+        Write-Log "CRITICAL FAILURE: $errorMessage"
     } finally {
         Disconnect-NTNXCluster -Servers * -ErrorAction SilentlyContinue
         
@@ -319,8 +323,14 @@ if ($env:GITHUB_STEP_SUMMARY) {
 "@
         foreach ($res in $resultsList) {
             # Normalize Status to exactly match capitalization/look from screenshot
-            # "Successful" (Capitalized), "failed" (Lowercase)
-            $statusStr = if ($res.Status -eq "Successful") { "Successful" } else { "failed" }
+            # "Successful" (Capitalized), "failed" (Lowercase), "VM Not Found"
+            $statusStr = if ($res.Status -eq "Successful") {
+                "Successful"
+            } elseif ($res.Status -eq "VM Not Found") {
+                "VM Not Found"
+            } else {
+                "failed"
+            }
             $summary += "`n| $($res.'VM Name') | $($res.'Snapshot Name') | $($res.Action) | $statusStr |"
         }
 
