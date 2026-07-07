@@ -1,52 +1,83 @@
-param($JsonInputs)
+[CmdletBinding()]
+param (
+    [Parameter(Mandatory = $true)]
+    [string]$JsonInputs
+)
+
 Write-Output "--- NUTANIX AUTOMATION DEBUG LOGS ---"
+Write-Output "Raw JSON input received: $JsonInputs"
 
-# Support both parameter passing and direct environment variable reading for maximum robustness
-$rawJson = $JsonInputs
-if (-not $rawJson -or $rawJson.Trim() -eq "") {
-    if ($env:INPUTS_JSON -and $env:INPUTS_JSON.Trim() -ne "") {
-        $rawJson = $env:INPUTS_JSON
-    }
+# Parse inputs
+try {
+    $inputs = ConvertFrom-Json $JsonInputs
+} catch {
+    Write-Error "Failed to parse JSON inputs: $($_.Exception.Message)"
+    exit 1
 }
 
-Write-Output "Raw JSON input received: $rawJson"
-$data = $rawJson | ConvertFrom-Json
-Write-Output "Parsed s1 (Site): $($data.s1)"
-Write-Output "Parsed v1 (VMs): $($data.v1)"
-Write-Output "Parsed op (Op): $($data.op)"
-Write-Output "Parsed sn1 (Snaps): $($data.sn1)"
-Write-Output "Parsed d1 (Delays): $($data.d1)"
+$siteName = $inputs.s1
+$vmsInput = $inputs.v1
+$op       = $inputs.op
+$snapsInput = $inputs.sn1
+$delaysInput = $inputs.d1
 
+Write-Output "Parsed s1 (Site): $siteName"
+Write-Output "Parsed v1 (VMs): $vmsInput"
+Write-Output "Parsed op (Op): $op"
+Write-Output "Parsed sn1 (Snaps): $snapsInput"
+Write-Output "Parsed d1 (Delays): $delaysInput"
+
+# Site to Cluster IP mapping
+$siteIpMap = @{
+    "Bangalore" = "10.10.10.10" # Replace with actual Bangalore PRISM IP
+    "Pune"      = "10.20.20.20" # Replace with actual Pune PRISM IP
+    "Chennai"   = "10.30.30.30" # Replace with actual Chennai PRISM IP
+}
+
+$siteIp = $siteIpMap[$siteName]
+if (-not $siteIp) {
+    Write-Error "Site name '$siteName' does not map to a configured Cluster IP."
+    exit 1
+}
+
+# Credentials
+$user = $env:PE_USER
+$pass = $env:PE_PASS
+
+if (-not $user -or -not $pass) {
+    Write-Error "Prism Element credentials (PE_USER, PE_PASS) are missing from the environment."
+    exit 1
+}
+
+# Helper to load snap-in
 function Initialize-Nutanix {
-    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
-        Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
+    if (!(Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
+        Add-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction Stop
     }
 }
 
-$siteMap = @{ "Bangalore" = "192.168.136.50"; "Pune" = "10.0.0.20"; "Chennai" = "10.0.0.10" }
-$siteName = [string]$data.s1
-$vmInput = [string]$data.v1
-$op = [string]$data.op # 1=Create, 2=Delete, 3=Restore
-$snapInput = [string]$data.sn1
-$delayInput = [string]$data.d1
-
-# Split comma-separated inputs
-$vmNames = @()
-if ($vmInput -and $vmInput.Trim() -ne "") {
-    $vmNames = @($vmInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
-}
-$snapNames = @()
-if ($snapInput -and $snapInput.Trim() -ne "") {
-    $snapNames = @($snapInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
+# Parse comma-separated variables
+$vmNames = [System.Collections.Generic.List[string]]::new()
+if ($vmsInput -and $vmsInput -ne "none") {
+    foreach ($v in $vmsInput.Split(',')) {
+        $trimmed = $v.Trim()
+        if ($trimmed) { [void]$vmNames.Add($trimmed) }
+    }
 }
 
-# Split delays – values are interpreted as MINUTES
+$snapNames = [System.Collections.Generic.List[string]]::new()
+if ($snapsInput -and $snapsInput -ne "none") {
+    foreach ($s in $snapsInput.Split(',')) {
+        $trimmed = $s.Trim()
+        if ($trimmed) { [void]$snapNames.Add($trimmed) }
+    }
+}
+
 $delayMinutes = [System.Collections.Generic.List[int]]::new()
-if ($delayInput -and $delayInput.Trim() -ne "") {
-    $parts = $delayInput.Split(",")
-    foreach ($part in $parts) {
-        $trimmed = $part.Trim()
-        if ($trimmed -ne "") {
+if ($delaysInput -and $delaysInput -ne "none") {
+    foreach ($d in $delaysInput.Split(',')) {
+        $trimmed = $d.Trim()
+        if ($trimmed) {
             $parsedVal = 0
             if ([int]::TryParse($trimmed, [ref]$parsedVal)) {
                 [void]$delayMinutes.Add($parsedVal)
@@ -79,7 +110,6 @@ try {
 }
 
 # Define the worker script block which will run in parallel threads.
-# Using param() block lets Invoke-Command bind parameters perfectly and thread-safely.
 $workerBlock = {
     param($siteIp, $user, $pass, $vmName, $snapName, $op, $delayMinutes)
     
@@ -198,23 +228,15 @@ $workerBlock = {
         }
         Write-Log "CRITICAL FAILURE: $errorMessage"
     } finally {
-        # Do not call Disconnect-NTNXCluster here to avoid cross-thread connection interference in the shared process space.
-        # Connection cleanup will be handled at the very end of the main thread.
+        try {
+            Disconnect-NTNXCluster -ErrorAction SilentlyContinue | Out-Null
+        } catch {}
         
-        $actionName = switch ($op) {
-            "1" { "create" }
-            "2" { "delete" }
-            "3" { "restore" }
-            default { "unknown" }
-        }
-
-        # Output the structural results object as PSCustomObject with keys matching the requested exact column names
+        # Output a clean structured tracking block back to the parent stream
         [PSCustomObject]@{
-            "VM Name"       = $vmName
-            "Snapshot Name" = $snapName
-            "Action"        = $actionName
-            "Status"        = $workerStatus
-            "Error"         = $errorMessage
+            VMName       = $vmName
+            Status       = $workerStatus
+            ErrorMessage = $errorMessage
         }
     }
 }
@@ -226,147 +248,96 @@ $pool = [RunspaceFactory]::CreateRunspacePool([int]$vmNames.Count, [int]$vmNames
 $pool.Open()
 
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
-    $vmName = $vmNames[$i]
-    $snapName = if ($i -lt $snapNames.Count) { $snapNames[$i] } else { "$vmName-snapshot" }
+    $currentVmName = $vmNames[$i]
     
-    # Determine delay in MINUTES
-    $delayMin = 0
-    if ($delayMinutes.Count -eq 0) {
-        $delayMin = 20   # Default 20 minutes
-    } elseif ($delayMinutes.Count -eq 1) {
-        $delayMin = $delayMinutes[0]
-    } else {
-        if ($i -lt $delayMinutes.Count) {
-            $delayMin = $delayMinutes[$i]
-        } else {
-            $delayMin = $delayMinutes[$delayMinutes.Count - 1]
-        }
-    }
-    Write-Output "Allocated VM '$vmName' delay: $delayMin minutes."
-
-    $ps = [PowerShell]::Create()
-    $ps.RunspacePool = $pool
+    # Sequential fallback indexing for snapshots and delays if counts don't match perfectly
+    $currentSnapName = if ($i -lt $snapNames.Count) { $snapNames[$i] } else { $snapNames[$snapNames.Count - 1] }
+    $currentDelay = if ($i -lt $delayMinutes.Count) { $delayMinutes[$i] } else { 0 }
     
-    # Use Invoke-Command with Explicit ArgumentList to bind parameters to the worker script block perfectly.
-    [void]$ps.AddCommand("Invoke-Command")
-    [void]$ps.AddParameter("ScriptBlock", $workerBlock)
+    Write-Output "Queueing independent thread for VM: $currentVmName | Snapshot: $currentSnapName | Delay: $currentDelay minutes"
     
-    $argsList = @(
-        $siteMap[$siteName],
-        $env:PE_USER,
-        $env:PE_PASS,
-        $vmName,
-        $snapName,
-        $op,
-        $delayMin   # pass minutes
-    )
-    [void]$ps.AddParameter("ArgumentList", $argsList)
-
-    $handle = $ps.BeginInvoke()
+    $powershell = [PowerShell]::Create()
+    $powershell.RunspacePool = $pool
+    
+    # Bind parameters safely
+    [void]$powershell.AddScript($workerBlock)
+    [void]$powershell.AddArgument($siteIp)
+    [void]$powershell.AddArgument($user)
+    [void]$powershell.AddArgument($pass)
+    [void]$powershell.AddArgument($currentVmName)
+    [void]$powershell.AddArgument($currentSnapName)
+    [void]$powershell.AddArgument($op)
+    [void]$powershell.AddArgument($currentDelay)
+    
+    $handle = $powershell.BeginInvoke()
     
     $runspaces += [PSCustomObject]@{
-        PowerShell = $ps
-        Handle     = $handle
-        VMName     = $vmName
+        PowerShellObj = $powershell
+        Handle        = $handle
+        VMName        = $currentVmName
     }
 }
 
-Write-Output "Dispatched parallel thread-workers for $($vmNames.Count) VMs."
-Write-Output "Waiting for parallel execution threads to complete..."
-
-$hasErrors = $false
-$resultsList = @()
-$completedRunspaces = @{}
+# Wait asynchronously for all background threads to complete, retrieving and logging messages immediately
+Write-Output "Successfully launched all independent tasks. Monitoring execution streams..."
 $completedCount = 0
+$resultsTable = [System.Collections.Generic.List[PSCustomObject]]::new()
 
 while ($completedCount -lt $runspaces.Count) {
+    Start-Sleep -Seconds 5
     foreach ($r in $runspaces) {
-        if (-not $completedRunspaces[$r.VMName] -and $r.Handle.IsCompleted) {
-            Write-Output "`n======================================================================"
-            Write-Output "LOG STREAM: VM '$($r.VMName)'"
-            Write-Output "======================================================================"
+        if ($r.Handle -and $r.Handle.IsCompleted) {
+            # Retrieve output and dispose resources
+            $outputs = $r.PowerShellObj.EndInvoke($r.Handle)
             
-            # Retrieve standard output and check for the PSCustomObject result
-            $output = $r.PowerShell.EndInvoke($r.Handle)
-            foreach ($line in $output) {
-                if ($line -is [System.Management.Automation.PSCustomObject] -and $line.PSObject.Properties['VM Name'] -ne $null) {
-                    $resultsList += $line
-                } else {
-                    Write-Output $line
-                }
+            # Print verbose logs produced inside the thread
+            $streams = $r.PowerShellObj.Streams
+            if ($streams.Verbose) {
+                foreach ($v in $streams.Verbose) { Write-Output "[VERBOSE] $v" }
             }
-
-            # Retrieve errors
-            if ($r.PowerShell.Streams.Error.Count -gt 0) {
-                $hasErrors = $true
-                foreach ($err in $r.PowerShell.Streams.Error) {
-                    Write-Error "[VM: $($r.VMName)] $err"
-                }
+            if ($streams.Error) {
+                foreach ($err in $streams.Error) { Write-Output "[ERROR] $err" }
             }
             
-            $r.PowerShell.Dispose()
-            $completedRunspaces[$r.VMName] = $true
+            # Extract final status
+            if ($outputs) {
+                foreach ($out in $outputs) {
+                    if ($out.VMName) {
+                        $resultsTable.Add($out)
+                    }
+                }
+            } else {
+                $resultsTable.Add([PSCustomObject]@{
+                    VMName       = $r.VMName
+                    Status       = "failed"
+                    ErrorMessage = "No structured response returned from thread execution."
+                })
+            }
+            
+            # Clear handle to avoid processing again
+            $r.Handle = $null
+            $r.PowerShellObj.Dispose()
             $completedCount++
         }
     }
-    Start-Sleep -Seconds 1
 }
 
+# Clean up pool
 $pool.Close()
 $pool.Dispose()
 
-# Cleanup connections at the very end of the main script
-try {
-    Disconnect-NTNXCluster -Servers * -ErrorAction SilentlyContinue
-} catch {}
+# Display final summary table
+Write-Output "`n=================================================="
+Write-Output "             FINAL EXECUTION SUMMARY              "
+Write-Output "=================================================="
+$resultsTable | Format-Table -AutoSize | Out-String | Write-Output
 
-# Create table matching screenshot exactly: VM Name | Snapshot Name | Action | Status
-Write-Output "`n===== EXECUTED RESULTS ====="
-$formatTable = $resultsList | Format-Table -Property "VM Name", "Snapshot Name", "Action", "Status" -AutoSize | Out-String
-Write-Output $formatTable
-
-# Write to GITHUB_STEP_SUMMARY as an elegant Markdown table matching the screenshot
-if ($env:GITHUB_STEP_SUMMARY) {
-    try {
-        $summary = @"
-### Nutanix VM Snapshot Report
-
-| VM Name | Snapshot Name | Action | Status |
-| :--- | :--- | :--- | :--- |
-"@
-        foreach ($res in $resultsList) {
-            # Normalize Status to exactly match capitalization/look from screenshot
-            # "Successful" (Capitalized), "failed" (Lowercase), "VM Not Found"
-            $statusStr = if ($res.Status -eq "Successful") {
-                "Successful"
-            } elseif ($res.Status -eq "VM Not Found") {
-                "VM Not Found"
-            } elseif ($res.Status -eq "Snapshot Name not Found") {
-                "Snapshot Name not Found"
-            } else {
-                "failed"
-            }
-            $summary += "`n| $($res.'VM Name') | $($res.'Snapshot Name') | $($res.Action) | $statusStr |"
-        }
-
-        # Check if there are any failed records to add details block
-        $failures = $resultsList | Where-Object { $_.Status -ne "Successful" }
-        if ($failures) {
-            $summary += "`n`n### Failure Details`n"
-            foreach ($fail in $failures) {
-                $summary += "- **$($fail.'VM Name')**: $($fail.Error)`n"
-            }
-        }
-        
-        $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-        Write-Output "`nSuccessfully appended report to GITHUB_STEP_SUMMARY."
-    } catch {
-        Write-Warning "Failed to write to GITHUB_STEP_SUMMARY: $($_.Exception.Message)"
-    }
-}
-
-# If we had any errors or any task failed, exit with 1
-$failedTasksCount = ($resultsList | Where-Object { $_.Status -ne "Successful" }).Count
-if ($hasErrors -or $failedTasksCount -gt 0) {
+# Verify if any workers failed and report non-zero exit code if needed
+$anyFailures = $resultsTable | Where-Object { $_.Status -ne "Successful" }
+if ($anyFailures) {
+    Write-Output "Workflow finished with errors."
     exit 1
+} else {
+    Write-Output "All operations finished successfully."
+    exit 0
 }
