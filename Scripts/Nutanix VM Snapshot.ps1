@@ -220,8 +220,8 @@ $workerBlock = {
 }
 
 $runspaces = @()
-# Set the min and max runspaces to the same count to ensure all VMs run concurrently without any sequential queue delay
-$pool = [RunspaceFactory]::CreateRunspacePool($vmNames.Count, $vmNames.Count, $iss, $Host)
+# Set min to 1 and max to the VM count, and pass $null instead of $Host to prevent runspaces from executing sequentially due to host-synchronization locks.
+$pool = [RunspaceFactory]::CreateRunspacePool(1, [int]$vmNames.Count, $iss, $null)
 $pool.Open()
 
 for ($i = 0; $i -lt $vmNames.Count; $i++) {
