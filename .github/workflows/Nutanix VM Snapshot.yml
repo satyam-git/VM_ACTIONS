@@ -31,17 +31,17 @@ on:
         type: string
         default: 'none'
       d1:
-         description: 'Independent Delays in minutes (e.g. 20 for all, or 10,30 for sequential)'
-         required: false
-         type: string
-         default: 'none'
+        description: 'Independent Delays in minutes (e.g. 20 for all, or 10,30 for sequential)'
+        required: false
+        type: string
+        default: 'none'
 
 jobs:
   run-snapshot-job:
     runs-on: self-hosted
     steps:
       - name: Checkout Repository
-         uses: actions/checkout@v4
+        uses: actions/checkout@v4
 
       - name: Run Multi-VM Snapshot Operation
         shell: powershell
