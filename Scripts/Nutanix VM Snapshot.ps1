@@ -7,7 +7,7 @@ param(
 )
 
 $siteMap = @{
-    "Bangalore" = "10.150.22.10"
+    "Bangalore" = "192.168.136.50"
     "Pune"      = "10.160.22.10"
     "Chennai"   = "10.170.22.10"
 }
