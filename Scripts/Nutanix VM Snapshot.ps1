@@ -1,85 +1,72 @@
-param($JsonInputs)
-Write-Output "--- NUTANIX AUTOMATION DEBUG LOGS ---"
+# [UTF-8 with BOM Encoding]
+# Nutanix VM Snapshot Orchestration Script
+# Handles high-performance, asynchronous parallel snapshot operations on multiple VMs on Prism Element.
 
-# Support both parameter passing and direct environment variable reading for maximum robustness
-$rawJson = $JsonInputs
-if (-not $rawJson -or $rawJson.Trim() -eq "") {
-    if ($env:INPUTS_JSON -and $env:INPUTS_JSON.Trim() -ne "") {
-        $rawJson = $env:INPUTS_JSON
-    }
+param(
+    [string]$JsonInputs
+)
+
+$siteMap = @{
+    "Bangalore" = "10.150.22.10"
+    "Pune"      = "10.160.22.10"
+    "Chennai"   = "10.170.22.10"
 }
 
-Write-Output "Raw JSON input received: $rawJson"
-$data = $rawJson | ConvertFrom-Json
-Write-Output "Parsed s1 (Site): $($data.s1)"
-Write-Output "Parsed v1 (VMs): $($data.v1)"
-Write-Output "Parsed op (Op): $($data.op)"
-Write-Output "Parsed sn1 (Snaps): $($data.sn1)"
-Write-Output "Parsed d1 (Delays): $($data.d1)"
-
-function Initialize-Nutanix {
-    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
-        Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
-    }
-}
-
-$siteMap = @{ "Bangalore" = "192.168.136.50"; "Pune" = "10.0.0.20"; "Chennai" = "10.0.0.10" }
-$siteName = [string]$data.s1
-$vmInput = [string]$data.v1
-$op = [string]$data.op # 1=Create, 2=Delete, 3=Restore
-$snapInput = [string]$data.sn1
-$delayInput = [string]$data.d1
-
-# Split comma-separated inputs
+# Parse JSON Inputs dynamically with robust failbacks
+$siteName = "None"
 $vmNames = @()
-if ($vmInput -and $vmInput.Trim() -ne "") {
-    $vmNames = @($vmInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
-}
 $snapNames = @()
-if ($snapInput -and $snapInput.Trim() -ne "") {
-    $snapNames = @($snapInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
-}
+$op = "1"
+$delayMinutes = @()
 
-# Split delays – values are interpreted as MINUTES
-$delayMinutes = [System.Collections.Generic.List[int]]::new()
-if ($delayInput -and $delayInput.Trim() -ne "") {
-    $parts = $delayInput.Split(",")
-    foreach ($part in $parts) {
-        $trimmed = $part.Trim()
-        if ($trimmed -ne "") {
-            $parsedVal = 0
-            if ([int]::TryParse($trimmed, [ref]$parsedVal)) {
-                [void]$delayMinutes.Add($parsedVal)
-            }
+if ($JsonInputs) {
+    try {
+        $parsed = ConvertFrom-Json $JsonInputs
+        
+        if ($parsed.s1) { $siteName = $parsed.s1 }
+        
+        if ($parsed.v1 -and $parsed.v1 -ne "none") {
+            $vmNames = $parsed.v1.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
         }
+        
+        if ($parsed.sn1 -and $parsed.sn1 -ne "none") {
+            $snapNames = $parsed.sn1.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+        }
+        
+        if ($parsed.op) { $op = $parsed.op }
+        
+        if ($parsed.d1 -and $parsed.d1 -ne "none") {
+            $delayMinutes = $parsed.d1.Split(",") | ForEach-Object { [int]$_.Trim() }
+        }
+    } catch {
+        Write-Warning "Failed parsing JSON input: $($_.Exception.Message)"
     }
 }
-Write-Output "List of parsed delays (in minutes): $($delayMinutes -join ', ')"
 
+# Assert basic runtime validation parameters
+if ($siteName -eq "None" -or -not $siteMap.ContainsKey($siteName)) {
+    Write-Error "CRITICAL: A valid target site must be selected ($($siteMap.Keys -join ', '))."
+    exit 1
+}
 if ($vmNames.Count -eq 0) {
-    Write-Error "No VM names provided."
+    Write-Error "CRITICAL: No VM Names were provided."
     exit 1
 }
 
-# Pre-initialize Nutanix on the host thread to ensure assemblies/types are registered and cached
+$siteIp = $siteMap[$siteName]
+Write-Output "Parsed inputs: Site = $siteName ($siteIp), VMs = $($vmNames -join ', '), Snapshot Names = $($snapNames -join ', '), Op = $op, Delays (minutes) = $($delayMinutes -join ', ')"
+
+# Dynamically import the required module or snap-in safely
 try {
-    Initialize-Nutanix
+    if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
+        Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
+    }
 } catch {
-    Write-Warning "Failed to pre-load Nutanix snap-in on host thread: $($_.Exception.Message)"
+    Write-Error "NutanixCmdletsPSSnapin is not loaded and could not be found: $($_.Exception.Message)"
+    exit 1
 }
 
-# Create a custom InitialSessionState and pre-register/import the Nutanix snap-in
-# so that all Runspaces created by the pool inherit the loaded snap-in by default in a thread-safe manner.
-$iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-$warning = $null
-try {
-    $iss.ImportPSSnapIn("NutanixCmdletsPSSnapin", [ref]$warning)
-} catch {
-    Write-Warning "Failed to pre-import Nutanix snap-in into InitialSessionState: $($_.Exception.Message)"
-}
-
-# Define the worker script block which will run in parallel threads.
-# Using param() block lets Invoke-Command bind parameters perfectly and thread-safely.
+# Thread Worker Block definition for parallel runspaces
 $workerBlock = {
     param($siteIp, $user, $pass, $vmName, $snapName, $op, $delayMinutes)
     
@@ -93,7 +80,7 @@ $workerBlock = {
     # Robust, thread-safe dynamic check to verify if the Nutanix snap-in cmdlets
     # are actually loaded and visible in the current Runspace session.
     try {
-        if (-not (Get-Command Connect-NTNXCluster -ErrorAction SilentlyContinue)) {
+        if (-not (Get-PSSnapin -Name NutanixCmdletsPSSnapin -ErrorAction SilentlyContinue)) {
             Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
         }
     } catch {
@@ -101,7 +88,6 @@ $workerBlock = {
         return
     }
 
-    # Convert minutes to seconds for the sleep
     $delaySec = $delayMinutes * 60
     if ($delaySec -gt 0) {
         Write-NtnxLog "Delaying execution by $delayMinutes minutes ($delaySec seconds)..."
@@ -190,9 +176,9 @@ $workerBlock = {
     } catch {
         $errorMessage = $_.Exception.Message
         if ($errorMessage -like "*was not found on cluster*") {
-            $workerStatus = "VM Not Found"
+            $workerStatus = "vm not found"
         } elseif ($errorMessage -like "*Snapshot*not found*") {
-            $workerStatus = "Snapshot Name not Found"
+            $workerStatus = "Snapshot not found"
         } else {
             $workerStatus = "failed"
         }
@@ -336,13 +322,13 @@ if ($env:GITHUB_STEP_SUMMARY) {
 "@
         foreach ($res in $resultsList) {
             # Normalize Status to exactly match capitalization/look from screenshot
-            # "Successful" (Capitalized), "failed" (Lowercase), "VM Not Found"
+            # "Successful" (Capitalized), "failed" (Lowercase), "vm not found", "Snapshot not found"
             $statusStr = if ($res.Status -eq "Successful") {
                 "Successful"
-            } elseif ($res.Status -eq "VM Not Found") {
-                "VM Not Found"
-            } elseif ($res.Status -eq "Snapshot Name not Found") {
-                "Snapshot Name not Found"
+            } elseif ($res.Status -eq "vm not found" -or $res.Status -eq "VM Not Found") {
+                "vm not found"
+            } elseif ($res.Status -eq "Snapshot not found" -or $res.Status -eq "Snapshot Name not Found" -or $res.Status -eq "Snapshot not Found") {
+                "Snapshot not found"
             } else {
                 "failed"
             }
