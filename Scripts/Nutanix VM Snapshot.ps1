@@ -23,24 +23,24 @@ function Initialize-Nutanix {
     }
 }
 
-$siteMap = @{ "Bangalore" = "161.85.26.110"; "Pune" = "10.0.0.20"; "Chennai" = "10.0.0.10" }
+$siteMap = @{ "Bangalore" = "192.168.136.50"; "Pune" = "10.0.0.20"; "Chennai" = "10.0.0.10" }
 $siteName = [string]$data.s1
 $vmInput = [string]$data.v1
 $op = [string]$data.op # 1=Create, 2=Delete, 3=Restore
 $snapInput = [string]$data.sn1
 $delayInput = [string]$data.d1
 
-# Split comma-separated inputs with explicit [string[]] array type definitions
-[string[]]$vmNames = @()
+# Split comma-separated inputs
+$vmNames = @()
 if ($vmInput -and $vmInput.Trim() -ne "") {
-    $vmNames = [string[]]@($vmInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
+    $vmNames = @($vmInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
 }
-[string[]]$snapNames = @()
+$snapNames = @()
 if ($snapInput -and $snapInput.Trim() -ne "") {
-    $snapNames = [string[]]@($snapInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
+    $snapNames = @($snapInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
 }
 
-# Split delays - values are interpreted as MINUTES
+# Split delays – values are interpreted as MINUTES
 $delayMinutes = [System.Collections.Generic.List[int]]::new()
 if ($delayInput -and $delayInput.Trim() -ne "") {
     $parts = $delayInput.Split(",")
@@ -83,12 +83,12 @@ try {
 $workerBlock = {
     param($siteIp, $user, $pass, $vmName, $snapName, $op, $delayMinutes)
     
-    function Write-NtnxLog($msg) {
+    function Write-Log($msg) {
         $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         Write-Output "[$timestamp] [VM: $vmName] $msg"
     }
     
-    Write-NtnxLog "Background worker initialized. Site IP: $siteIp, Action Op: $op, Delay (minutes): $delayMinutes"
+    Write-Log "Background worker initialized. Site IP: $siteIp, Action Op: $op, Delay (minutes): $delayMinutes"
 
     # Robust, thread-safe dynamic check to verify if the Nutanix snap-in cmdlets
     # are actually loaded and visible in the current Runspace session.
@@ -97,106 +97,106 @@ $workerBlock = {
             Add-PSSnapin NutanixCmdletsPSSnapin -ErrorAction Stop
         }
     } catch {
-        Write-NtnxLog "Failed to load Nutanix snap-in inside background worker thread: $($_.Exception.Message)"
+        Write-Log "Failed to load Nutanix snap-in inside background worker thread: $($_.Exception.Message)"
         return
     }
 
     # Convert minutes to seconds for the sleep
     $delaySec = $delayMinutes * 60
     if ($delaySec -gt 0) {
-        Write-NtnxLog "Delaying execution by $delayMinutes minutes ($delaySec seconds)..."
+        Write-Log "Delaying execution by $delayMinutes minutes ($delaySec seconds)..."
         Start-Sleep -Seconds $delaySec
-        Write-NtnxLog "Delay completed. Resuming operation."
+        Write-Log "Delay completed. Resuming operation."
     } else {
-        Write-NtnxLog "Starting execution immediately."
+        Write-Log "Starting execution immediately."
     }
 
     $workerStatus = "Successful"
     $errorMessage = ""
 
     try {
-        Write-NtnxLog "Connecting to Prism Element on $siteIp..."
+        Write-Log "Connecting to Prism Element on $siteIp..."
         $creds = [System.Security.SecureString]::new()
         foreach ($c in $pass.ToCharArray()) { $creds.AppendChar($c) }
         Connect-NTNXCluster -Server $siteIp -UserName $user -Password $creds -AcceptInvalidSSLCerts -ErrorAction Stop | Out-Null
-        Write-NtnxLog "Connected successfully."
+        Write-Log "Connected successfully."
 
-        Write-NtnxLog "Locating target VM..."
+        Write-Log "Locating target VM..."
         $vm = Get-NTNXVM -SearchString $vmName | Where-Object { $_.vmName -eq $vmName } | Select-Object -First 1
         if (-not $vm) {
             throw "VM '$vmName' was not found on cluster."
         }
-        Write-NtnxLog "VM found with UUID: $($vm.uuid). PowerState: $($vm.powerState)"
+        Write-Log "VM found with UUID: $($vm.uuid). PowerState: $($vm.powerState)"
 
         switch ($op) {
             "1" { # CREATE
-                Write-NtnxLog "Creating snapshot '$snapName'..."
+                Write-Log "Creating snapshot '$snapName'..."
                 $spec = New-NTNXObject -Name SnapshotSpecDTO
                 $spec.vmUuid = $vm.uuid
                 $spec.snapshotName = $snapName
                 New-NTNXSnapshot -SnapshotSpecs $spec -ErrorAction Stop | Out-Null
-                Write-NtnxLog "SUCCESS: Created snapshot '$snapName'"
+                Write-Log "SUCCESS: Created snapshot '$snapName'"
             }
             "2" { # DELETE
-                Write-NtnxLog "Searching for snapshot '$snapName'..."
+                Write-Log "Searching for snapshot '$snapName'..."
                 $snap = Get-NTNXSnapshot | Where-Object { $_.vmUuid -eq $vm.uuid -and $_.snapshotName -eq $snapName }
                 if (-not $snap) { throw "Snapshot '$snapName' not found." }
-                Write-NtnxLog "Deleting snapshot '$snapName'..."
+                Write-Log "Deleting snapshot '$snapName'..."
                 Remove-NTNXSnapshot -Uuid $snap.uuid -ErrorAction Stop | Out-Null
-                Write-NtnxLog "SUCCESS: Deleted snapshot '$snapName'"
+                Write-Log "SUCCESS: Deleted snapshot '$snapName'"
             }
             "3" { # RESTORE
-                Write-NtnxLog "Searching for snapshot '$snapName'..."
+                Write-Log "Searching for snapshot '$snapName'..."
                 $snap = Get-NTNXSnapshot | Where-Object { $_.vmUuid -eq $vm.uuid -and $_.snapshotName -eq $snapName }
                 if (-not $snap) { throw "Snapshot '$snapName' not found." }
 
                 if ($vm.powerState -eq "ON") {
-                    Write-NtnxLog "VM is currently powered ON. Initiating ACPI graceful shutdown..."
+                    Write-Log "VM is currently powered ON. Initiating ACPI graceful shutdown..."
                     Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction Stop | Out-Null
                     
                     $isOff = $false
                     # Try up to 10 shutdown verification cycles (30s interval each)
                     for($attempt = 1; $attempt -le 10; $attempt++) {
-                        Write-NtnxLog "Waiting 30 seconds to validate VM power status (Attempt $attempt/10)..."
+                        Write-Log "Waiting 30 seconds to validate VM power status (Attempt $attempt/10)..."
                         Start-Sleep -Seconds 30
                         
                         $checkVm = Get-NTNXVM -Vmid $vm.uuid
                         if ($checkVm.powerState -eq "OFF") { 
                             $isOff = $true
-                            Write-NtnxLog "VM shutdown validated. PowerState is OFF."
+                            Write-Log "VM shutdown validated. PowerState is OFF."
                             break 
                         }
                         
                         if ($attempt -lt 10) {
-                            Write-NtnxLog "VM is still ON. Re-triggering ACPI graceful shutdown..."
+                            Write-Log "VM is still ON. Re-triggering ACPI graceful shutdown..."
                             Set-NTNXVMPowerState -Vmid $vm.uuid -Transition ACPI_SHUTDOWN -ErrorAction Stop | Out-Null
                         }
                     }
                     if (-not $isOff) { throw "VM failed to shut down after multiple ACPI graceful shutdown triggers." }
                 }
 
-                Write-NtnxLog "Waiting 60 seconds to allow the hypervisor to release disk locks..."
+                Write-Log "Waiting 60 seconds to allow the hypervisor to release disk locks..."
                 Start-Sleep -Seconds 60
 
-                Write-NtnxLog "Restoring VM state from snapshot '$snapName'..."
+                Write-Log "Restoring VM state from snapshot '$snapName'..."
                 Restore-NTNXVirtualMachine -Vmid $vm.uuid -SnapshotUuid $snap.uuid -ErrorAction Stop | Out-Null
-                Write-NtnxLog "Reverted block-storage states cleanly."
+                Write-Log "Reverted block-storage states cleanly."
 
-                Write-NtnxLog "Powering VM back ON..."
+                Write-Log "Powering VM back ON..."
                 Set-NTNXVMPowerOn -Vmid $vm.uuid -ErrorAction Stop | Out-Null
-                Write-NtnxLog "SUCCESS: Restore completed and powered ON successfully."
+                Write-Log "SUCCESS: Restore completed and powered ON successfully."
             }
         }
     } catch {
         $errorMessage = $_.Exception.Message
         if ($errorMessage -like "*was not found on cluster*") {
-            $workerStatus = "vm not found"
+            $workerStatus = "VM Not Found"
         } elseif ($errorMessage -like "*Snapshot*not found*") {
-            $workerStatus = "Snapshot not found"
+            $workerStatus = "Snapshot Name not Found"
         } else {
             $workerStatus = "failed"
         }
-        Write-NtnxLog "CRITICAL FAILURE: $errorMessage"
+        Write-Log "CRITICAL FAILURE: $errorMessage"
     } finally {
         # Do not call Disconnect-NTNXCluster here to avoid cross-thread connection interference in the shared process space.
         # Connection cleanup will be handled at the very end of the main thread.
@@ -287,7 +287,7 @@ while ($completedCount -lt $runspaces.Count) {
             # Retrieve standard output and check for the PSCustomObject result
             $output = $r.PowerShell.EndInvoke($r.Handle)
             foreach ($line in $output) {
-                if ($line -is [System.Management.Automation.PSCustomObject] -and $null -ne $line.PSObject.Properties['VM Name']) {
+                if ($line -is [System.Management.Automation.PSCustomObject] -and $line.PSObject.Properties['VM Name'] -ne $null) {
                     $resultsList += $line
                 } else {
                     Write-Output $line
@@ -316,9 +316,7 @@ $pool.Dispose()
 # Cleanup connections at the very end of the main script
 try {
     Disconnect-NTNXCluster -Servers * -ErrorAction SilentlyContinue
-} catch {
-    Write-Verbose "Disconnection error: $($_.Exception.Message)"
-}
+} catch {}
 
 # Create table matching screenshot exactly: VM Name | Snapshot Name | Action | Status
 Write-Output "`n===== EXECUTED RESULTS ====="
@@ -336,13 +334,13 @@ if ($env:GITHUB_STEP_SUMMARY) {
 "@
         foreach ($res in $resultsList) {
             # Normalize Status to exactly match capitalization/look from screenshot
-            # "Successful" (Capitalized), "failed" (Lowercase), "vm not found", "Snapshot not found"
+            # "Successful" (Capitalized), "failed" (Lowercase), "VM Not Found"
             $statusStr = if ($res.Status -eq "Successful") {
                 "Successful"
-            } elseif ($res.Status -eq "vm not found" -or $res.Status -eq "VM Not Found") {
-                "vm not found"
-            } elseif ($res.Status -eq "Snapshot not found" -or $res.Status -eq "Snapshot Name not Found" -or $res.Status -eq "Snapshot not Found") {
-                "Snapshot not found"
+            } elseif ($res.Status -eq "VM Not Found") {
+                "VM Not Found"
+            } elseif ($res.Status -eq "Snapshot Name not Found") {
+                "Snapshot Name not Found"
             } else {
                 "failed"
             }
@@ -365,19 +363,8 @@ if ($env:GITHUB_STEP_SUMMARY) {
     }
 }
 
-# If we had any critical errors or any actual task failed, exit with 1
-# We treat "Successful", "vm not found", and "Snapshot not found" as handled/successful for the workflow.
-$failedTasks = $resultsList | Where-Object { 
-    $_.Status -ne "Successful" -and 
-    $_.Status -ne "vm not found" -and 
-    $_.Status -ne "VM Not Found" -and 
-    $_.Status -ne "Snapshot not found" -and 
-    $_.Status -ne "Snapshot Name not Found" -and 
-    $_.Status -ne "Snapshot not Found"
-}
-
-$failedTasksCount = if ($failedTasks) { @($failedTasks).Count } else { 0 }
-
-if ($failedTasksCount -gt 0 -or ($hasErrors -and $resultsList.Count -eq 0)) {
+# If we had any errors or any task failed, exit with 1
+$failedTasksCount = ($resultsList | Where-Object { $_.Status -ne "Successful" }).Count
+if ($hasErrors -or $failedTasksCount -gt 0) {
     exit 1
 }
