@@ -1,7 +1,3 @@
-# [UTF-8 with BOM Encoding]
-# Nutanix VM Snapshot Orchestration Script
-# Handles high-performance, asynchronous parallel snapshot operations on multiple VMs on Prism Element.
-
 param($JsonInputs)
 Write-Output "--- NUTANIX AUTOMATION DEBUG LOGS ---"
 
@@ -27,7 +23,7 @@ function Initialize-Nutanix {
     }
 }
 
-$siteMap = @{ "Bangalore" = "192.168.136.50"; "Pune" = "10.0.0.20"; "Chennai" = "10.0.0.10" }
+$siteMap = @{ "Bangalore" = "161.85.26.110"; "Pune" = "10.0.0.20"; "Chennai" = "10.0.0.10" }
 $siteName = [string]$data.s1
 $vmInput = [string]$data.v1
 $op = [string]$data.op # 1=Create, 2=Delete, 3=Restore
