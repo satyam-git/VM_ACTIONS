@@ -44,7 +44,7 @@ if ($snapInput -and $snapInput.Trim() -ne "") {
     $snapNames = [string[]]@($snapInput.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
 }
 
-# Split delays – values are interpreted as MINUTES
+# Split delays - values are interpreted as MINUTES
 $delayMinutes = [System.Collections.Generic.List[int]]::new()
 if ($delayInput -and $delayInput.Trim() -ne "") {
     $parts = $delayInput.Split(",")
@@ -369,8 +369,19 @@ if ($env:GITHUB_STEP_SUMMARY) {
     }
 }
 
-# If we had any errors or any task failed, exit with 1
-$failedTasksCount = ($resultsList | Where-Object { $_.Status -ne "Successful" }).Count
-if ($hasErrors -or $failedTasksCount -gt 0) {
+# If we had any critical errors or any actual task failed, exit with 1
+# We treat "Successful", "vm not found", and "Snapshot not found" as handled/successful for the workflow.
+$failedTasks = $resultsList | Where-Object { 
+    $_.Status -ne "Successful" -and 
+    $_.Status -ne "vm not found" -and 
+    $_.Status -ne "VM Not Found" -and 
+    $_.Status -ne "Snapshot not found" -and 
+    $_.Status -ne "Snapshot Name not Found" -and 
+    $_.Status -ne "Snapshot not Found"
+}
+
+$failedTasksCount = if ($failedTasks) { @($failedTasks).Count } else { 0 }
+
+if ($failedTasksCount -gt 0 -or ($hasErrors -and $resultsList.Count -eq 0)) {
     exit 1
 }
