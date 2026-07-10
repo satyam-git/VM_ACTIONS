@@ -1,7 +1,3 @@
-# [UTF-8 with BOM Encoding]
-# Nutanix VM Snapshot Orchestration Script
-# Handles high-performance, asynchronous parallel snapshot operations on multiple VMs on Prism Element.
-
 param(
     [string]$JsonInputs
 )
@@ -26,17 +22,17 @@ if ($JsonInputs) {
         if ($parsed.s1) { $siteName = $parsed.s1 }
         
         if ($parsed.v1 -and $parsed.v1 -ne "none") {
-            $vmNames = $parsed.v1.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+            $vmNames = [string[]]@($parsed.v1.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
         }
         
         if ($parsed.sn1 -and $parsed.sn1 -ne "none") {
-            $snapNames = $parsed.sn1.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+            $snapNames = [string[]]@($parsed.sn1.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
         }
         
         if ($parsed.op) { $op = $parsed.op }
         
         if ($parsed.d1 -and $parsed.d1 -ne "none") {
-            $delayMinutes = $parsed.d1.Split(",") | ForEach-Object { [int]$_.Trim() }
+            $delayMinutes = [int[]]@($parsed.d1.Split(",") | ForEach-Object { [int]$_.Trim() })
         }
     } catch {
         Write-Warning "Failed parsing JSON input: $($_.Exception.Message)"
@@ -351,8 +347,19 @@ if ($env:GITHUB_STEP_SUMMARY) {
     }
 }
 
-# If we had any errors or any task failed, exit with 1
-$failedTasksCount = ($resultsList | Where-Object { $_.Status -ne "Successful" }).Count
-if ($hasErrors -or $failedTasksCount -gt 0) {
+# If we had any critical errors or any actual task failed, exit with 1
+# We treat "Successful", "vm not found", and "Snapshot not found" as handled/successful for the workflow.
+$failedTasks = $resultsList | Where-Object { 
+    $_.Status -ne "Successful" -and 
+    $_.Status -ne "vm not found" -and 
+    $_.Status -ne "VM Not Found" -and 
+    $_.Status -ne "Snapshot not found" -and 
+    $_.Status -ne "Snapshot Name not Found" -and 
+    $_.Status -ne "Snapshot not Found"
+}
+
+$failedTasksCount = if ($failedTasks) { @($failedTasks).Count } else { 0 }
+
+if ($failedTasksCount -gt 0 -or ($hasErrors -and $resultsList.Count -eq 0)) {
     exit 1
 }
